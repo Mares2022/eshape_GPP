@@ -1,0 +1,36 @@
+docker run --name eshape -v /c/Users/fuentesm/CISNE/vlabs:/eshape_codes -v /c/Users/fuentesm/CISNE/vlabs_inputs:/e_shape_data -i -t eshapegpp/eshape_germany:1.0
+
+/c/Users/fuentesm/CISNE/vlabs
+/c/Users/fuentesm/CISNE/vlabs_inputs
+
+
+docker commit eshape eshapegpp/eshape_docker
+docker push eshapegpp/eshape_docker
+
+
+https://raw.githubusercontent.com/Mares2022/eshape_GPP/main/data_inputs/NEE_spain.txt
+https://raw.githubusercontent.com/Mares2022/eshape_GPP/main/data_inputs/EV_spain.txt
+https://raw.githubusercontent.com/Mares2022/eshape_GPP/main/data_inputs/Configuration_file_spain.cfg
+
+
+docker run --name eshapeV2 -v /c/Users/fuentesm/CISNE/vlabs:/eshape_codes -v /c/Users/fuentesm/CISNE/vlabs_inputs:/e_shape_data -i -t eshapegpp/eshape_germany:1.0
+
+
+mkdir dataoutput
+
+apt-get install zip
+
+zip -r e_shape_data.zip dataoutput
+
+zip -r output_file.zip e_shape_data
+
+dir
+zip -r dataoutput/Output.zip eshape_codes/e_shape_linux/Output
+rm -rf e_shape_data.zip
+
+
+zip -r Results.zip e_shape_linux/Output
+
+
+cp eshape_codes/e_shape_linux/Output dataoutput/
+zip -r dataoutput/Output.zip eshape_codes/e_shape_linux/Output
