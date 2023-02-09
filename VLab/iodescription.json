@@ -42,7 +42,7 @@
       "description": "Results",
       "name"       : "Results",
       "valueSchema": "url",
-      "target"     : "Results.zip",
+      "target"     : "Results.zip"
     }
   ]
 }
