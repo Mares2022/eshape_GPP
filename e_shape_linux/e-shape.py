@@ -340,7 +340,7 @@ if __name__ == '__main__':
     vector_scale                    = config['MAPS'].getint('vector_scale',                  100)
     
     # constant variables
-    calculated_gpp   = True
+    calculated_gpp   = False
     calculated_vi    = False
     download_maps    = True
     time_window_maps = 'SM'
