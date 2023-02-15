@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# In[87]:
+# In[199]:
 
 
 """
@@ -78,7 +78,7 @@ Final version code including analysis in Trognon and Finland
 """
 
 
-# In[88]:
+# In[200]:
 
 
 #Intallation of environment through jupyter notebooks
@@ -109,7 +109,7 @@ Final version code including analysis in Trognon and Finland
 # conda install -c anaconda ipython
 
 
-# In[89]:
+# In[201]:
 
 
 #Import Python packages used in the code
@@ -144,9 +144,10 @@ from datetime import date, datetime
 from dateutil.relativedelta import relativedelta
 import time 
 import calc_footprint_FFP_climatology as ffpmodule
+import urllib.request
 
 
-# In[90]:
+# In[202]:
 
 
 #Function to identify columns with specific beggining
@@ -337,651 +338,690 @@ if __name__ == '__main__':
     training_dataset                = config['MAPS'].getint('training_dataset',             1000)
     scale_getRegion                 = config['MAPS'].getint('scale_getRegion',               100)
     vector_scale                    = config['MAPS'].getint('vector_scale',                  100)
+    
+    # constant variables
+    calculated_gpp   = True
+    calculated_vi    = False
+    download_maps    = True
+    time_window_maps = 'SM'
+    contourlines_frequency = 0.2
 
 
-# In[5]:
+# In[203]:
 
 
 #*********************************************************************************************************************************************************************
-#2)   Setting data frames
-print('2)   Formatting data frames \n')
-t01 = ptime.time()
+if not calculated_gpp:
+#*********************************************************************************************************************************************************************
+    #2)   Setting data frames
+    print('2)   Formatting data frames \n')
+    t01 = ptime.time()
 
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-#2.a)   Read eddy covariance files (eufluxfiles)
-print('      Read data: ', eufluxfile)
+    #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    #2.a)   Read eddy covariance files (eufluxfiles)
+    print('      Read data: ', eufluxfile)
 
-# Assert iterable                                                                                  #This process reads the names of the eufluxfiles and adds the directory information. The loop allows to introduce n number of files for different years
-if ',' in eufluxfile:
-    eufluxfile     = eufluxfile.split(',')
-    
-    eufluxfile     = [ inputdir  + ee.strip() for ee in eufluxfile ]                               #Change 6. Add inputdir                                                                                 
-else:                                                                                              #If the inputdir  is not added in this section, the input file need to be in the main directory and not in the inputdir file          
-    if eufluxfile:                                                                                   
-        eufluxfile = [inputdir  + eufluxfile]
+    # Assert iterable                                                                                  #This process reads the names of the eufluxfiles and adds the directory information. The loop allows to introduce n number of files for different years
+    if ',' in eufluxfile:
+        eufluxfile     = eufluxfile.split(',')
+
+        eufluxfile     = [ inputdir  + ee.strip() for ee in eufluxfile ]                               #Change 6. Add inputdir                                                                                 
+    else:                                                                                              #If the inputdir  is not added in this section, the input file need to be in the main directory and not in the inputdir file          
+        if eufluxfile:                                                                                   
+            eufluxfile = [inputdir  + eufluxfile]
+        else:
+            try:
+                eufluxfile = hf.files_from_gui(                                                        #If any direction to the files is given, the files has to be selected through a pop up window
+                    initialdir='.', title='europe-fluxdata.eu file(s)')
+            except:
+                raise IOError("GUI for europe-fluxdata.eu file(s) failed.")
+
+    # Identify rows in the dataframe to skipt              
+    if skiprows == 'None':                                                                             #This process allows to identify the rows to skipt in the data frames. They can be row indexes in a list
+        skiprows = ''
+    if skiprows:
+        import json  # to analyse int or list, tuple not working
+        skiprows = json.loads(skiprows.replace('(', '[').replace(')', ']'))
+
+    # Read input files into Panda data frame and check variable availability
+    parser = lambda date: dt.datetime.strptime(date, timeformat)                               
+
+    infile = eufluxfile[0]                                                                             #Loads the first file in the eufluxfile list                                                                                          
+    df = pd.read_csv(infile, sep, skiprows=skiprows, parse_dates=[0], 
+                     date_parser=parser, index_col=0, header=0)
+    if len(eufluxfile) > 1:                                                                            #Iterate to integrate all the files in case of data for different years is available 
+        for infile in eufluxfile[1:]:                    
+            df_aux_2a = pd.read_csv(infile, sep, skiprows=skiprows, parse_dates=[0],
+                              date_parser=parser, index_col=0, header=0)
+            df       = df.append(df_aux_2a, sort=False)
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ 
+    #2.b)   Ensure constant 30-minute frequency in the datasets    
+    print('      Ensuring 30-minute frequncy: ', eufluxfile)
+
+    # Identify beggining and end of the time series
+    df_time_aux = df.copy()
+    df_time_aux = df_time_aux.reset_index()
+    time1_aux   = df_time_aux.iloc[0, 0]
+    time2_aux   = df_time_aux.iloc[df.shape[0] -1,0]
+
+    # Create time series with 30-minute frequency 
+    time_series_aux = pd.date_range(time1_aux, time2_aux, freq="30min")
+    time_series_aux = pd.DataFrame(time_series_aux).rename(columns={0: 'TIMESTAMP_START'})
+    time_series_aux ['TIMESTAMP_END']   = time_series_aux['TIMESTAMP_START'] + dt.timedelta(minutes = 30)
+    time_series_aux.set_index('TIMESTAMP_START',inplace=True)
+
+    # Retrun'TIMESTAMP_START' as index of the origina data set and merge the dataframe with 30-minute frequency
+    df_time_aux.set_index('TIMESTAMP_START',inplace=True)
+    df_time_aux.drop('TIMESTAMP_END', axis =1, inplace=True)
+    df_time_aux_final = pd.merge(left= time_series_aux, right = df_time_aux,
+                     how="left", left_index = True , right_index = True)
+    #df_time_aux_final.replace(np.nan, undef, inplace=True)
+    df = df_time_aux_final.copy(deep=True)
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------        
+    #2.c)   Formatting the input file    
+    print('      Formating data: ', eufluxfile)
+
+    # Fill the null values (NaN) with undef values (e.g. -9999.)
+    df.fillna(undef, inplace=True)
+    # Fill the undef values (e.g. -9999.) with null values (NaN)
+    #df.replace(-9999., np.nan, inplace=True)
+    #The workflow works with undef values defined in the configuration file rather
+
+    # Flag.                                                                                            #Create file with flags
+    dff              = df.copy(deep=True)
+    dff[:]           = 0
+    dff[df == undef] = 2                                                                               #(Flag 2) for undef values or null values
+    #dff[df.isna()]   = 2
+
+    # day / night
+    #isday = df['SW_IN'] > swthr                                                                       #This column in the data frame indicates the short wave radiation which
+    hsw = ['SW_IN']                                                                                    #can be use to identify difference between day an night. Threshold is set in the configuration file
+    hout = _findfirststart(hsw, df.columns)                                                            #Change 7. Use _findfirststart method to look for the SW_IN column
+    isday = df[hout[0]] >= swthr
+
+    if remove_SW_IN:                                                                                   # Remove 'SW_IN' data from the data frame to not be used in the GPP flux partitioning in case the data is not available for the year of study but is calculated from other years' mean values 
+        df['SW_IN']=-9999.                                                                             #Change 7.1 Remove SW_IN. This change is just relevant for the study case of Doñana National Park
+        df['SW_IN'].replace(-9999., np.nan, inplace=True)                                              #The change might also be needed when SW_IN takes negative values. Integrated negative SW_IN values in the model formulation might result in negative GPP. This require to be evaluated.
+
+    # Check Ta in Kelvin
+    hta = ['TA']                                                                                       #Change 8. Change TA_ for TA. Allows more flexibility in the column names of the input file
+    hout = _findfirststart(hta, df.columns)                                                            #This process identifies if the temperature is in kelvin or in celcious                                                
+    if df[hout[0]].max() < 100.:
+        tkelvin = 273.15
     else:
-        try:
-            eufluxfile = hf.files_from_gui(                                                        #If any direction to the files is given, the files has to be selected through a pop up window
-                initialdir='.', title='europe-fluxdata.eu file(s)')
-        except:
-            raise IOError("GUI for europe-fluxdata.eu file(s) failed.")
-            
-# Identify rows in the dataframe to skipt              
-if skiprows == 'None':                                                                             #This process allows to identify the rows to skipt in the data frames. They can be row indexes in a list
-    skiprows = ''
-if skiprows:
-    import json  # to analyse int or list, tuple not working
-    skiprows = json.loads(skiprows.replace('(', '[').replace(')', ']'))
-    
-# Read input files into Panda data frame and check variable availability
-parser = lambda date: dt.datetime.strptime(date, timeformat)                               
+        tkelvin = 0.
 
-infile = eufluxfile[0]                                                                             #Loads the first file in the eufluxfile list                                                                                          
-df = pd.read_csv(infile, sep, skiprows=skiprows, parse_dates=[0], 
-                 date_parser=parser, index_col=0, header=0)
-if len(eufluxfile) > 1:                                                                            #Iterate to integrate all the files in case of data for different years is available 
-    for infile in eufluxfile[1:]:                    
-        df_aux_2a = pd.read_csv(infile, sep, skiprows=skiprows, parse_dates=[0],
-                          date_parser=parser, index_col=0, header=0)
-        df       = df.append(df_aux_2a, sort=False)
-        
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ 
-#2.b)   Ensure constant 30-minute frequency in the datasets    
-print('      Ensuring 30-minute frequncy: ', eufluxfile)
+    # Add tkelvin only where not flagged
+    df.loc[dff[hout[0]] == 0, hout[0]] += tkelvin
 
-# Identify beggining and end of the time series
-df_time_aux = df.copy()
-df_time_aux = df_time_aux.reset_index()
-time1_aux   = df_time_aux.iloc[0, 0]
-time2_aux   = df_time_aux.iloc[df.shape[0] -1,0]
-
-# Create time series with 30-minute frequency 
-time_series_aux = pd.date_range(time1_aux, time2_aux, freq="30min")
-time_series_aux = pd.DataFrame(time_series_aux).rename(columns={0: 'TIMESTAMP_START'})
-time_series_aux ['TIMESTAMP_END']   = time_series_aux['TIMESTAMP_START'] + dt.timedelta(minutes = 30)
-time_series_aux.set_index('TIMESTAMP_START',inplace=True)
-
-# Retrun'TIMESTAMP_START' as index of the origina data set and merge the dataframe with 30-minute frequency
-df_time_aux.set_index('TIMESTAMP_START',inplace=True)
-df_time_aux.drop('TIMESTAMP_END', axis =1, inplace=True)
-df_time_aux_final = pd.merge(left= time_series_aux, right = df_time_aux,
-                 how="left", left_index = True , right_index = True)
-#df_time_aux_final.replace(np.nan, undef, inplace=True)
-df = df_time_aux_final.copy(deep=True)
-
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------        
-#2.c)   Formatting the input file    
-print('      Formating data: ', eufluxfile)
-
-# Fill the null values (NaN) with undef values (e.g. -9999.)
-df.fillna(undef, inplace=True)
-# Fill the undef values (e.g. -9999.) with null values (NaN)
-#df.replace(-9999., np.nan, inplace=True)
-#The workflow works with undef values defined in the configuration file rather
-    
-# Flag.                                                                                            #Create file with flags
-dff              = df.copy(deep=True)
-dff[:]           = 0
-dff[df == undef] = 2                                                                               #(Flag 2) for undef values or null values
-#dff[df.isna()]   = 2
-
-# day / night
-#isday = df['SW_IN'] > swthr                                                                       #This column in the data frame indicates the short wave radiation which
-hsw = ['SW_IN']                                                                                    #can be use to identify difference between day an night. Threshold is set in the configuration file
-hout = _findfirststart(hsw, df.columns)                                                            #Change 7. Use _findfirststart method to look for the SW_IN column
-isday = df[hout[0]] >= swthr
-
-if remove_SW_IN:                                                                                   # Remove 'SW_IN' data from the data frame to not be used in the GPP flux partitioning in case the data is not available for the year of study but is calculated from other years' mean values 
-    df['SW_IN']=-9999.                                                                             #Change 7.1 Remove SW_IN. This change is just relevant for the study case of Doñana National Park
-    df['SW_IN'].replace(-9999., np.nan, inplace=True)                                              #The change might also be needed when SW_IN takes negative values. Integrated negative SW_IN values in the model formulation might result in negative GPP. This require to be evaluated.
-    
-# Check Ta in Kelvin
-hta = ['TA']                                                                                       #Change 8. Change TA_ for TA. Allows more flexibility in the column names of the input file
-hout = _findfirststart(hta, df.columns)                                                            #This process identifies if the temperature is in kelvin or in celcious                                                
-if df[hout[0]].max() < 100.:
-    tkelvin = 273.15
-else:
-    tkelvin = 0.
-    
-# Add tkelvin only where not flagged
-df.loc[dff[hout[0]] == 0, hout[0]] += tkelvin
-
-# Add vpd if not given
-hvpd = ['VPD']
-hout = _findfirststart(hvpd, df.columns)
-if len(hout) == 0:
-    hvpd = ['TA', 'RH']                                                                            #Change 9. Change TA_ and RH_ for TA and RH                                                                               
+    # Add vpd if not given
+    hvpd = ['VPD']
     hout = _findfirststart(hvpd, df.columns)
-    if len(hout) != 2:
-        raise ValueError('Cannot calculate VPD.')
-    ta_id = hout[0]
-    rh_id = hout[1]
-    if df[ta_id].max() < 100.:
-        tk = df[ta_id] + 273.15
+    if len(hout) == 0:
+        hvpd = ['TA', 'RH']                                                                            #Change 9. Change TA_ and RH_ for TA and RH                                                                               
+        hout = _findfirststart(hvpd, df.columns)
+        if len(hout) != 2:
+            raise ValueError('Cannot calculate VPD.')
+        ta_id = hout[0]
+        rh_id = hout[1]
+        if df[ta_id].max() < 100.:
+            tk = df[ta_id] + 273.15
+        else:
+            tk = df[ta_id]
+        if df[rh_id].max() > 10.:
+            rh = df[rh_id] / 100.
+        else:
+            rh = df[rh_id]
+        rh_1    = 1. - rh                                                                              #VPD calculation needed to be fixed in the source code in case there is no VPD data in the input dataset
+        ta_1    = pj.esat(tk)
+        rh_1_df = rh_1.to_frame().reset_index()
+        ta_1_df = ta_1.to_frame().rename(columns={0: 'TK'})
+        rh_1_df['VPD_Total'] = rh_1_df['RH'] * ta_1_df['TK']
+        vpd_1_df = rh_1_df.set_index('TIMESTAMP_START')
+        vpd_id = 'VPD'
+        df[vpd_id] = vpd_1_df['VPD_Total']
+        df[vpd_id].where((df[ta_id] != undef) | (df[rh_id] != undef),
+                         other=undef, inplace=True)
+        dff[vpd_id] = np.where((dff[ta_id] + dff[rh_id]) > 0, 2, 0)                                    #(Flag 2) in 'VPD'  where ta or rh is not available
+        df.loc[dff[vpd_id] == 0, vpd_id] /= 100.                                                       #Converts from hPa to Pa 
+
+    # Check VPD in Pa
+    hvpd = ['VPD']
+    hout = _findfirststart(hvpd, df.columns)
+    if df[hout[0]].max() < 10.:     # kPa
+        vpdpa = 1000.
+    elif df[hout[0]].max() < 100.:  # hPa
+        vpdpa = 100.
     else:
-        tk = df[ta_id]
-    if df[rh_id].max() > 10.:
-        rh = df[rh_id] / 100.
+        vpdpa = 1.                  # Pa
+    df.loc[dff[hout[0]] == 0, hout[0]] *= vpdpa  
+
+    # Time stepping                                                                                    #Derives the number of records per day
+    dsec  = (df.index[1] - df.index[0]).seconds
+    ntday = np.rint(86400 / dsec).astype(np.int)                                                       
+    #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    t02   = ptime.time()                                                                               #Change 9. The legend of computation time were modified
+    strin = ( '{:.1f} [minutes]'.format((t02 - t01) / 60.)                                           
+              if (t02 - t01) > 60.
+              else '{:d} [seconds]'.format(int(t02 - t01))
+            )
+    print('\n')
+    print('     Computation setting data frames in ', strin , end='\n')
+    print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # 3)   Outlier detection
+    if outlier:
+        print('3)   Spike detection \n')
+        t11 = ptime.time()
+
+        # Finds carbon flux data (e.g. NEE or FC)
+        houtlier = [carbonflux]                                                                        #Change 10. Process only the carbonflux variable (H and LE could be processed in the same way)                                            
+        hout = _findfirststart(houtlier, df.columns)
+        print('      Using:', hout)
+
+        # Applies the spike detection. Only one call to mad for all variables                          #carbonflux variable can be a list with NEE, H, LE, etc. and the .madspike() requires to be called only once for alll the variables
+        sflag = hf.madspikes(df[hout], flag=dff[hout], isday=isday,                                    #This function creates flags with value 2 for outliers that are translated to flags 3 in the dff file
+                             undef=undef, nscan=nscan * ntday,                                 
+                             nfill=nfill * ntday, z=z, deriv=deriv, plot=False)
+
+        for ii, hh in enumerate(hout):
+            dff.loc[sflag[hh] == 2, hh]   = 3                                                          #(Flag 3) for outlieres. The tool flags outliers even when there are emptyspaces
+            #dff.loc[df[hh] == undef , hh] = 2                                                         #It cannot assign flag 3 if there was not data available in the carbonflux data. It is a correction of the flag                                                        
+
+        t12   = ptime.time()                                                                           #Change 11. Change legend of computation time  
+        strin = ( '{:.1f} [minutes]'.format((t12 - t11) / 60.)                                                
+                  if (t12 - t11) > 60.
+                  else '{:d} [seconds]'.format(int(t12 - t11))
+                )
+        print('\n')
+        print('     Computation outlier detection in ', strin)  
+        print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # 4) u* filtering (data for a full year)
+    if  ustar:                                                                                         #This method requires a data set with data for a full year
+        print('4)   u* filtering \n')
+        t21 = ptime.time()
+
+        #Looking for carbonflux, u*, and temperature data
+        hfilt = [carbonflux, 'USTAR', 'TA']                                                            #Change 12. Change 'NEE' for carbonflux variable
+        hout  = _findfirststart(hfilt, df.columns)
+
+        assert len(hout) == 3, 'Could not find CO2 flux (NEE or FC), USTAR or TA in input file.'
+        print('      Using:', hout)
+
+        #Saves a copy of the flags of the carbonflux data
+        ffsave = dff[hout[0]].to_numpy()
+
+        #Sets a temporal flag 
+        #iic    = np.where((~isday) & (df[hout[0]] < 0.))[0] 
+        #dff.iloc[iic, list(df.columns).index(hout[0])] = 4                                            #(Flag 4). Temporal flag for data with negative values in the carbon fluxes during night
+                                                                                                       #Assigns flag 4 for cases of GPP negative during night time.
+        dff.loc[(~isday) & (df[hout[0]] < 0.), hout[0]] = 4 
+        # Applies the u* filtering
+        ustars, flag = hf.ustarfilter(df[hout], flag=dff[hout],                                       #Check method to identify why the temporal flag is required in the ustarfilter
+                                      isday=isday, undef=undef,                                       #ustarfilter function creates flags with value 2 for outliers that are translated to flags 3 in the dff file                 
+                                      ustarmin=ustarmin, nboot=nboot,
+                                      plateaucrit=plateaucrit,
+                                      seasonout=seasonout,
+                                      plot=False)
+
+        dff[hout[0]] = ffsave                                                                          #Return to original flags file without 4-flag
+        df  = df.assign(USTAR_TEST=flag)                                                               #Change 14. Change 'USTAR_TEST_1_1_1' column name for 'USTAR_TEST'                                                                
+        dff = dff.assign(USTAR_TEST=np.zeros(df.shape[0], dtype=np.int))                               #This line adds a column in the dataframe of flags to make them symmetrical 
+        flag = pd.DataFrame(flag).rename(columns={'USTAR': carbonflux})
+
+        if applyustarflag:
+            hustar = [carbonflux]                                                                      #Change 15. Process only the carbonflux variable (H and LE could be processed in the same way)   
+            hout = _findfirststart(hustar, df.columns)
+            print('      Using:', hout)
+            for ii, hh in enumerate(hout):
+                dff.loc[flag [hh] == 2, hh] = 5                                                        #(Flag 5) for carbon fluxes with ustar(friction velocity) below a calculated threshold
+                #dff.loc[df[hh] == undef, hh] = 2                                  
+
+        t22   = ptime.time()                                                                           #Change 16. Change legend of computation time.
+        strin = ( '{:.1f} [minutes]'.format((t22 - t21) / 60.)                                           
+                  if (t22 - t21) > 60.
+                  else '{:d} [seconds]'.format(int(t22 - t21))
+                )
+        print('\n')
+        print('     Computation u* filtering detection in ', strin) 
+        print('\n')
+
+    #------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+    # 4)   u* filtering (data for partial year)
+    if  ustar_non_annual :                                                                             #Change 17. ustar_non_annual  is a copy of ustar without the 'ustarfilter'
+        print('4)   u* filtering (less than 1-year data) \n')                                          #The ustar_non_annual method is simple approach to manually set a ustar threshold when 
+        t21 = ptime.time()                                                                             #there is no data for a full year required to compute ustar threshold
+
+        #Looking for carbonflux, u*, and temperature data
+        hfilt = [carbonflux, 'USTAR', 'TA']                                                            
+        hout  = _findfirststart(hfilt, df.columns)
+        assert len(hout) == 3, 'Could not find CO2 flux (NEE or FC), USTAR or TA in input file.'
+        print('      Using:', hout)
+
+        flag = sflag.copy().multiply(0)
+
+        #Flags when the USTAR is below ustarmin and when there is carbonflux data available for the same timestep. 
+        flag.loc[(df['USTAR'] < ustarmin) & (df['USTAR'] != undef) & (df[carbonflux] != undef), carbonflux] = 2.
+        #flag.loc[(df['USTAR'] < ustarmin), carbonflux] = 2.
+
+        df  = df.assign(USTAR_TEST=flag)               
+        dff = dff.assign(USTAR_TEST=np.zeros(df.shape[0], dtype=np.int))
+
+        if applyustarflag:
+            hustar = [carbonflux]
+            hout = _findfirststart(hustar, df.columns)
+            print('      Using:', hout)
+            for ii, hh in enumerate(hout):
+                dff.loc[flag[hh] == 2, hh] = 5 
+                #dff.loc[df[hh] == undef, hh] = 2 
+
+        t22   = ptime.time()                                                                           
+        strin = ( '{:.1f} [minutes]'.format((t22 - t21) / 60.)                                           
+                  if (t22 - t21) > 60.
+                  else '{:d} [seconds]'.format(int(t22 - t21))
+                )
+        print('\n')
+        print('     Computation u* filtering detection in ', strin) 
+        print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # 5)   Flux partitioning
+    if partition:
+        print('5)   Flux partitioning \n')
+        t31 = ptime.time()
+
+        #Looking for carbon flux, global radiation, temperature and vpd data
+        hpart = [carbonflux, 'SW_IN', 'TA', 'VPD']                                                     #Change 18. Change 'NEE' for carbonflux variable                                                                      
+        hout  = _findfirststart(hpart, df.columns)
+        assert len(hout) == 4, 'Could not find CO2 flux (NEE or FC), SW_IN, TA, or VPD in input file.'
+        print('      Using:', hout)
+
+        suff = hout[0]                                                                                 #Change 20. Rename with the carbonflux variable              
+
+        # nighttime method
+        print('      Nighttime partitioning')
+        dfpartn = hf.nee2gpp(df[hout], flag=dff[hout], isday=isday,
+                             undef=undef, method='reichstein',
+                             nogppnight=nogppnight)
+
+        dfpartn.rename(columns=lambda c: c + '_' + suff + '_rei', inplace=True)                        #Change 21. Add '_' before suff and change '1' with '_rei'
+
+        # falge method                                                                                 #Change 22. Falge method integration
+        print('      Falge method')
+        dfpartf = hf.nee2gpp(df[hout], flag=dff[hout], isday=isday,
+                             undef=undef, method='falge',         
+                             nogppnight=nogppnight)  
+
+        dfpartf.rename(columns=lambda c: c + '_' + suff + '_fal', inplace=True)
+
+        # daytime method                                                                               #Change 23. Day time method 'lasslop' integration
+        print('      Daytime partitioning')
+        dfpartd = hf.nee2gpp(df[hout], flag=dff[hout], isday=isday,
+                             undef=undef, method='lasslop',
+                             nogppnight=nogppnight)
+
+        dfpartd.rename(columns=lambda c: c  + '_' + suff + '_las', inplace=True) 
+
+        df = pd.concat([df, dfpartn, dfpartf, dfpartd],  axis=1)
+
+        # take flags from NEE or FC same flag
+        for dn in ['rei', 'fal', 'las']:
+            for gg in ['GPP', 'RECO']:                                                                 #Change 24. Adds '_' between labels
+                dff[gg + '_' + suff + '_'+ dn] = dff[hout[0]]                                          #Takes flags from the carbonflux variable
+
+        # flag GPP and RECO if they were not calculated
+        for dn in ['rei', 'fal', 'las']:
+            for gg in ['GPP', 'RECO']:                                                                 #Change 25. This method flags with 2 value the 'RECO' columns when 'GPP was not calculated
+                dff.loc[df['GPP' + '_' + suff + '_'+ dn] == undef, gg + '_' + suff + '_'+ dn ] = 2     #('GPP' == undef)
+
+        t32   = ptime.time()
+        strin = ( '{:.1f} [minutes]'.format((t32 - t31) / 60.)                                         #Change 26. Change legend of computation time.         
+                  if (t32 - t31) > 60.
+                  else '{:d} [seconds]'.format(int(t32 - t31))
+                )
+        print('\n')
+        print('     Computation flux partitioning detection in ', strin)  
+        print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # 6)   Gap-filling
+    if fill:        
+        print('6)   Gap-filling \n')
+        t41 = ptime.time()
+
+        #Looking for meteorological data
+        hfill = ['SW_IN', 'TA', 'VPD']
+        hout  = _findfirststart(hfill, df.columns)
+        assert len(hout) == 3, 'Could not find SW_IN, TA or VPD in input file.'
+
+        # if available
+        rei_gpp = 'GPP_'+carbonflux+'_rei'
+        rei_res = 'RECO_'+carbonflux+'_rei'
+        fal_gpp = 'GPP_'+carbonflux+'_fal'
+        fal_res = 'RECO_'+carbonflux+'_fal'
+        las_gpp = 'GPP_'+carbonflux+'_las'
+        las_res = 'RECO_'+carbonflux+'_las'
+
+        hfill = [ carbonflux,                                                                          #Change 27. Change names of columns to process
+                  rei_gpp,rei_res,fal_gpp,fal_res,las_gpp,las_res,
+                  'SW_IN', 'TA', 'VPD']
+
+        hout  = _findfirststart(hfill, df.columns)
+        print('      Using:', hout)
+
+        df_f, dff_f = hf.gapfill(df[hout], flag=dff[hout],
+                                 sw_dev=sw_dev, ta_dev=ta_dev, vpd_dev=vpd_dev,
+                                 longgap=longgap, undef=undef, err=False,
+                                 verbose=1)
+
+        #hdrop = ['SW_IN', 'TA', 'VPD']                           
+        #hout = _findfirststart(hdrop, df.columns)
+        #df_f.drop(columns=hout,  inplace=True)
+        #dff_f.drop(columns=hout, inplace=True)
+
+        def _add_f(c):
+            return '_'.join(c.split('_')[:-3] + c.split('_')[-3:]  + ['f'])                            #Change 28. 'f' of fill till the end of the name of the column names
+        df_f.rename(columns=_add_f,  inplace=True)
+        dff_f.rename(columns=_add_f, inplace=True)    
+
+        df  = pd.concat([df,  df_f],  axis=1)
+        dff = pd.concat([dff, dff_f], axis=1)
+
+        t42   = ptime.time()                                                                           #Change 29. Change legend of computation time.
+        strin = ( '{:.1f} [minutes]'.format((t42 - t41) / 60.)                                           
+                  if (t42 - t41) > 60.
+                  else '{:d} [seconds]'.format(int(t42 - t41))
+                )
+        print('\n')
+        print('     Computation filling gaps detection in ', strin) 
+        print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # 7)   Error estimate
+    if fluxerr:
+        print('7)   Flux error estimates \n')
+        t51 = ptime.time()
+
+        #Looking for meteorological data
+        hfill = ['SW_IN', 'TA', 'VPD']
+        hout  = _findfirststart(hfill, df.columns)
+        assert len(hout) == 3, 'Could not find SW_IN, TA or VPD in input file.'
+
+        # if available 
+        rei_gpp = 'GPP_'+carbonflux+'_rei'
+        rei_res = 'RECO_'+carbonflux+'_rei'
+        fal_gpp = 'GPP_'+carbonflux+'_fal'
+        fal_res = 'RECO_'+carbonflux+'_fal'
+        las_gpp = 'GPP_'+carbonflux+'_las'
+        las_res = 'RECO_'+carbonflux+'_las'
+
+        hfill = [ carbonflux,                                                                          #Change 30. Change names of columns to process
+                  rei_gpp,rei_res,fal_gpp,fal_res,las_gpp,las_res,
+                  'SW_IN', 'TA', 'VPD']
+
+        hout  = _findfirststart(hfill, df.columns)
+        print('      Using:', hout)
+
+        df_e = hf.gapfill(df[hout], flag=dff[hout],
+                          sw_dev=sw_dev, ta_dev=ta_dev, vpd_dev=vpd_dev,
+                          longgap=longgap, undef=undef, err=True, 
+                          verbose=1)
+
+        hdrop = ['SW_IN', 'TA', 'VPD']
+        hout = _findfirststart(hdrop, df.columns)
+        df_e.drop(columns=hout, inplace=True)
+
+        def _add_e(c):                                                                                 #Change 31. Create _add_e instead of reusing _add_f
+            return '_'.join(c.split('_')[:-3] + c.split('_')[-3:] + ['e'])
+
+        # rename the variables with e (error)
+        colin  = list(df_e.columns)
+        df_e.rename(columns=_add_e,  inplace=True)
+        colout = list(df_e.columns)                                                                    #List with updated names to display in the dff file
+        df     = pd.concat([df, df_e], axis=1)
+
+        # take flags of non-error columns with the same label
+        for cc in range(len(colin)):
+            dff[colout[cc]] = dff[colin[cc]]
+
+        t52   = ptime.time()                                                                           #Change 32. Change legend of computation time.
+        strin = ( '{:.1f} [minutes]'.format((t52 - t51) / 60.)                                           
+                  if (t52 - t51) > 60.
+                  else '{:d} [seconds]'.format(int(t52 - t51))
+                )
+        print('\n')
+        print('     Computation flux error estimates in ', strin) 
+        print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # 8)   Output
+    print('8)   Outputfile \n')
+    t61 = ptime.time()
+
+    if not outputfile:
+        try:
+            outputdir = hf.directory_from_gui(initialdir='.',
+                                              title='Output directory')
+        except:
+            raise IOError("GUI for output directory failed.")
+
+        outputfile = configfile[:configfile.rfind('.')]                                                #Takes the name from the configurtion file
+        outputfile = outputdir + '/' + ID + '_' + os.path.basename(outputfile + '.csv')                #Change 33. Change outdir for outputdir to select directly the output folder
     else:
-        rh = df[rh_id]
-    rh_1    = 1. - rh                                                                              #VPD calculation needed to be fixed in the source code in case there is no VPD data in the input dataset
-    ta_1    = pj.esat(tk)
-    rh_1_df = rh_1.to_frame().reset_index()
-    ta_1_df = ta_1.to_frame().rename(columns={0: 'TK'})
-    rh_1_df['VPD_Total'] = rh_1_df['RH'] * ta_1_df['TK']
-    vpd_1_df = rh_1_df.set_index('TIMESTAMP_START')
-    vpd_id = 'VPD'
-    df[vpd_id] = vpd_1_df['VPD_Total']
-    df[vpd_id].where((df[ta_id] != undef) | (df[rh_id] != undef),
-                     other=undef, inplace=True)
-    dff[vpd_id] = np.where((dff[ta_id] + dff[rh_id]) > 0, 2, 0)                                    #(Flag 2) in 'VPD'  where ta or rh is not available
-    df.loc[dff[vpd_id] == 0, vpd_id] /= 100.                                                       #Converts from hPa to Pa 
+        outputfile = outputdir +  outputfile + ID + '_' +  outputname                                  #Change 34. Create outputfile in case outputfile and outputdir are available 
 
-# Check VPD in Pa
-hvpd = ['VPD']
-hout = _findfirststart(hvpd, df.columns)
-if df[hout[0]].max() < 10.:     # kPa
-    vpdpa = 1000.
-elif df[hout[0]].max() < 100.:  # hPa
-    vpdpa = 100.
-else:
-    vpdpa = 1.                  # Pa
-df.loc[dff[hout[0]] == 0, hout[0]] *= vpdpa  
+    print('      Write output ', outputfile)
 
-# Time stepping                                                                                    #Derives the number of records per day
-dsec  = (df.index[1] - df.index[0]).seconds
-ntday = np.rint(86400 / dsec).astype(np.int)                                                       
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-t02   = ptime.time()                                                                               #Change 9. The legend of computation time were modified
-strin = ( '{:.1f} [minutes]'.format((t02 - t01) / 60.)                                           
-          if (t02 - t01) > 60.
-          else '{:d} [seconds]'.format(int(t02 - t01))
-        )
-print('\n')
-print('     Computation setting data frames in ', strin , end='\n')
-print('\n')
+    # Back to original units
+    hta = ['TA']
+    hout = _findfirststart(hta, df.columns)
+    df.loc[dff[hout[0]] == 0, hout[0]] -= tkelvin
+    hvpd = ['VPD']
+    hout = _findfirststart(hvpd, df.columns)
+    df.loc[dff[hout[0]] == 0, hout[0]] /= vpdpa
 
-#********************************************************************************************************************************************************************* 
-# 3)   Outlier detection
-if outlier:
-    print('3)   Spike detection \n')
-    t11 = ptime.time()
+    if outundef:
+        print('      Set flags to undef.')
+        for cc in df.columns:
+            if cc.split('_')[-1] != 'f' and cc.split('_')[-1] != 'e':  # exclude gap-filled columns    #Change 35. Change [-4] for [-1] and exclude error 'e' columns
+                df[cc].where(dff[cc] == 0, other=undef, inplace=True)  # Is the & working?             #This line writes undef (-9999.) for all the flagged data
 
-    # Finds carbon flux data (e.g. NEE or FC)
-    houtlier = [carbonflux]                                                                        #Change 10. Process only the carbonflux variable (H and LE could be processed in the same way)                                            
-    hout = _findfirststart(houtlier, df.columns)
-    print('      Using:', hout)
-    
-    # Applies the spike detection. Only one call to mad for all variables                          #carbonflux variable can be a list with NEE, H, LE, etc. and the .madspike() requires to be called only once for alll the variables
-    sflag = hf.madspikes(df[hout], flag=dff[hout], isday=isday,                                    #This function creates flags with value 2 for outliers that are translated to flags 3 in the dff file
-                         undef=undef, nscan=nscan * ntday,                                 
-                         nfill=nfill * ntday, z=z, deriv=deriv, plot=False)
-    
-    for ii, hh in enumerate(hout):
-        dff.loc[sflag[hh] == 2, hh]   = 3                                                          #(Flag 3) for outlieres. The tool flags outliers even when there are emptyspaces
-        #dff.loc[df[hh] == undef , hh] = 2                                                         #It cannot assign flag 3 if there was not data available in the carbonflux data. It is a correction of the flag                                                        
+    if outflagcols:
+        print('      Add flag columns.')
 
-    t12   = ptime.time()                                                                           #Change 11. Change legend of computation time  
-    strin = ( '{:.1f} [minutes]'.format((t12 - t11) / 60.)                                                
-              if (t12 - t11) > 60.
-              else '{:d} [seconds]'.format(int(t12 - t11))
+        def _add_flag(c):
+            return 'flag_' + c
+        dff.rename(columns=_add_flag, inplace=True)
+
+        # no flag columns for flags
+        dcol = []
+        for hh in dff.columns:
+            if '_TEST' in hh:                                                                          #Avoids bringing _TEST data from dff which is an data columnd only with zero values not connected to the datasets                                                                 #Change 36. Change '_TEST_' for '_TEST'
+                dcol.append(hh)
+        if dcol:
+            dff.drop(columns=dcol, inplace=True)                                                       #Remove the TEST columns
+        df = pd.concat([df, dff], axis=1)
+
+    else:
+        print('      Add flag columns for gap-filled variables.')
+        occ = []
+        for cc in df.columns:
+            if cc.split('_')[-1] == 'f' or cc.split('_')[-1] == 'e':                                   #Change 37. Add the error columns 'e' in the condition
+                occ.append(cc)                                                                         #Selects only flags for _f or _e
+        dff1 = dff[occ].copy(deep=True)                                                               
+        dff1.rename(columns=lambda c: 'flag_' + c, inplace=True)
+        df = pd.concat([df, dff1], axis=1)
+
+    print('      Write.')
+
+    #df.to_csv(outputfile, sep=sep, na_rep=str(undef), index=True, date_format=timeformat)
+    df.to_csv(outputfile)
+
+    t62   = ptime.time()
+    strin = ( '{:.1f} [minutes]'.format((t62 - t61) / 60.)                                             #Change 37. Change legend of computation time.          
+              if (t62 - t61) > 60.
+              else '{:d} [seconds]'.format(int(t62 - t61))
             )
     print('\n')
-    print('     Computation outlier detection in ', strin)  
+    print('     Creating output file in ', strin) 
     print('\n')
+
+    #********************************************************************************************************************************************************************* 
+    # Next elements are complement modules to compute Remote Sensing empirical models of GPP           #Change 39. All below code is extra code to derive empirical models
+    #*********************************************************************************************************************************************************************
+    # 9)   Daily estimations 
+    if daily_gpp:                                                                                       
+        print('9)   Daily GPP \n')
+        t71 = ptime.time()
+
+        # Daily GPP and enviromental drivers
+        gpp = df.copy()
+
+        gpp = gpp[(gpp[carbonflux+'_f'] < carbonfluxlimit) & (gpp[carbonflux+'_f'] > -carbonfluxlimit)]                                                           #These parameters are set to avoid having fluxing carboxes beyond specific established limits.
+        gpp = gpp[(gpp[rei_res+'_f'] < respirationlimit) & (gpp[rei_res+'_f'] > -respirationlimit)] 
+
+        gpp_mean = gpp[['TA_f','VPD_f','SW_IN_f']]
+        gpp_sum  = gpp[[carbonflux+'_f',rei_gpp+'_f',rei_res+'_f',fal_gpp+'_f',fal_res+'_f',las_gpp+'_f',las_res+'_f']] * 12 * 30 * 60 /1000000
+
+        gpp_mean = gpp_mean.reset_index()
+        gpp_sum  = gpp_sum.reset_index()
+
+        gpp_mean['date']  =  gpp_mean['TIMESTAMP_START'].dt.date
+        gpp_sum ['date']  =  gpp_sum['TIMESTAMP_START'].dt.date
+
+        gpp_mean.replace(undef, np.nan, inplace=True)
+        gpp_sum.replace(undef, np.nan, inplace=True) 
+
+        gpp_mean_daily = gpp_mean.groupby('date').mean()
+        gpp_sum_daily  = gpp_sum.groupby('date').sum()
+
+        df_gpp = pd.concat([gpp_mean_daily, gpp_sum_daily], axis=1)
+
+        # identify beggining and end of the time series
+        df_time = df_gpp.reset_index()
+        time1 = df_time.iloc[0, 0]
+        time2 = df_time.iloc[df_gpp.shape[0] -1,0]
+
+        # create time series with daily frequency (Not needed if usinf gap filled variables)
+        time_series = pd.date_range(time1, time2, freq="D")
+        time_series = pd.DataFrame(time_series).rename(columns={0: 'date'}).set_index('date')
+        df_gpp_time = pd.merge(left= time_series, right = df_gpp,
+                                 how="left", left_index = True , right_index = True)
+
+        # smoth time series  
+        #df_gpp_smoth  = df_gpp_smoth.interpolate(method='akima', order=1, limit_direction ='backward')
+        df_gpp_smoth  = df_gpp_time.interpolate(method='akima', order=1, limit_direction ='forward')
+        df_gpp_smoth  = df_gpp_smoth.rolling(rolling_window_gpp, center=rolling_center_gpp, min_periods=rolling_min_periods).mean()
+
+        # save file of daily GPP
+        df_gpp_smoth.to_csv(outputdir + "/GPP_output/" + ID + "_GPP_daily.csv")
+
+        # save time series plot
+        model = '_rei_f'
+
+        data_ec        = df_gpp_smoth.reset_index()
+        data_co_fluxes = data_ec[['date','GPP_'+carbonflux+ model]].copy()
+        data_co_fluxes = data_co_fluxes.rename(columns={
+            'GPP_'+carbonflux + model: 'GPP (gC m-2 day-1)',
+        })
+        data_co_fluxes.head(10)
+
+        chart = alt.Chart(data_co_fluxes).mark_bar(size=1).encode(
+            x='date:T',
+            y='GPP (gC m-2 day-1):Q',
+            color=alt.Color(
+                'GPP (gC m-2 day-1):Q', scale=alt.Scale(scheme='redyellowgreen', domain=(0, 10))),
+            tooltip=[
+                alt.Tooltip('date:T', title='Date'),
+                alt.Tooltip('GPP (gC m-2 day-1):Q', title='GPP (gC m-2 day-1)')
+            ]).properties(width=600, height=300)
+
+        chart.save(outputdir + "/GPP_output/" + ID + "_GPP_daily.html")
+
+        t72   = ptime.time()
+        strin = ( '{:.1f} [minutes]'.format((t72 - t71) / 60.)                                                      
+                  if (t72 - t71) > 60.
+                  else '{:d} [seconds]'.format(int(t72 - t71))
+                )
+        print('     Computed daily GPP in ', strin) 
+        print('\n')
 
 #********************************************************************************************************************************************************************* 
-# 4) u* filtering (data for a full year)
-if  ustar:                                                                                         #This method requires a data set with data for a full year
-    print('4)   u* filtering \n')
-    t21 = ptime.time()
-    
-    #Looking for carbonflux, u*, and temperature data
-    hfilt = [carbonflux, 'USTAR', 'TA']                                                            #Change 12. Change 'NEE' for carbonflux variable
-    hout  = _findfirststart(hfilt, df.columns)
-
-    assert len(hout) == 3, 'Could not find CO2 flux (NEE or FC), USTAR or TA in input file.'
-    print('      Using:', hout)
-    
-    #Saves a copy of the flags of the carbonflux data
-    ffsave = dff[hout[0]].to_numpy()
-    
-    #Sets a temporal flag 
-    #iic    = np.where((~isday) & (df[hout[0]] < 0.))[0] 
-    #dff.iloc[iic, list(df.columns).index(hout[0])] = 4                                            #(Flag 4). Temporal flag for data with negative values in the carbon fluxes during night
-                                                                                                   #Assigns flag 4 for cases of GPP negative during night time.
-    dff.loc[(~isday) & (df[hout[0]] < 0.), hout[0]] = 4 
-    # Applies the u* filtering
-    ustars, flag = hf.ustarfilter(df[hout], flag=dff[hout],                                       #Check method to identify why the temporal flag is required in the ustarfilter
-                                  isday=isday, undef=undef,                                       #ustarfilter function creates flags with value 2 for outliers that are translated to flags 3 in the dff file                 
-                                  ustarmin=ustarmin, nboot=nboot,
-                                  plateaucrit=plateaucrit,
-                                  seasonout=seasonout,
-                                  plot=False)
-    
-    dff[hout[0]] = ffsave                                                                          #Return to original flags file without 4-flag
-    df  = df.assign(USTAR_TEST=flag)                                                               #Change 14. Change 'USTAR_TEST_1_1_1' column name for 'USTAR_TEST'                                                                
-    dff = dff.assign(USTAR_TEST=np.zeros(df.shape[0], dtype=np.int))                               #This line adds a column in the dataframe of flags to make them symmetrical 
-    flag = pd.DataFrame(flag).rename(columns={'USTAR': carbonflux})
-    
-    if applyustarflag:
-        hustar = [carbonflux]                                                                      #Change 15. Process only the carbonflux variable (H and LE could be processed in the same way)   
-        hout = _findfirststart(hustar, df.columns)
-        print('      Using:', hout)
-        for ii, hh in enumerate(hout):
-            dff.loc[flag [hh] == 2, hh] = 5                                                        #(Flag 5) for carbon fluxes with ustar(friction velocity) below a calculated threshold
-            #dff.loc[df[hh] == undef, hh] = 2                                  
-            
-    t22   = ptime.time()                                                                           #Change 16. Change legend of computation time.
-    strin = ( '{:.1f} [minutes]'.format((t22 - t21) / 60.)                                           
-              if (t22 - t21) > 60.
-              else '{:d} [seconds]'.format(int(t22 - t21))
-            )
-    print('\n')
-    print('     Computation u* filtering detection in ', strin) 
-    print('\n')
-    
-#------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
-# 4)   u* filtering (data for partial year)
-if  ustar_non_annual :                                                                             #Change 17. ustar_non_annual  is a copy of ustar without the 'ustarfilter'
-    print('4)   u* filtering (less than 1-year data) \n')                                          #The ustar_non_annual method is simple approach to manually set a ustar threshold when 
-    t21 = ptime.time()                                                                             #there is no data for a full year required to compute ustar threshold
-    
-    #Looking for carbonflux, u*, and temperature data
-    hfilt = [carbonflux, 'USTAR', 'TA']                                                            
-    hout  = _findfirststart(hfilt, df.columns)
-    assert len(hout) == 3, 'Could not find CO2 flux (NEE or FC), USTAR or TA in input file.'
-    print('      Using:', hout)
-    
-    flag = sflag.copy().multiply(0)
-    
-    #Flags when the USTAR is below ustarmin and when there is carbonflux data available for the same timestep. 
-    flag.loc[(df['USTAR'] < ustarmin) & (df['USTAR'] != undef) & (df[carbonflux] != undef), carbonflux] = 2.
-    #flag.loc[(df['USTAR'] < ustarmin), carbonflux] = 2.
-                           
-    df  = df.assign(USTAR_TEST=flag)               
-    dff = dff.assign(USTAR_TEST=np.zeros(df.shape[0], dtype=np.int))
-
-    if applyustarflag:
-        hustar = [carbonflux]
-        hout = _findfirststart(hustar, df.columns)
-        print('      Using:', hout)
-        for ii, hh in enumerate(hout):
-            dff.loc[flag[hh] == 2, hh] = 5 
-            #dff.loc[df[hh] == undef, hh] = 2 
-
-    t22   = ptime.time()                                                                           
-    strin = ( '{:.1f} [minutes]'.format((t22 - t21) / 60.)                                           
-              if (t22 - t21) > 60.
-              else '{:d} [seconds]'.format(int(t22 - t21))
-            )
-    print('\n')
-    print('     Computation u* filtering detection in ', strin) 
-    print('\n')
-    
-#********************************************************************************************************************************************************************* 
-# 5)   Flux partitioning
-if partition:
-    print('5)   Flux partitioning \n')
-    t31 = ptime.time()
-    
-    #Looking for carbon flux, global radiation, temperature and vpd data
-    hpart = [carbonflux, 'SW_IN', 'TA', 'VPD']                                                     #Change 18. Change 'NEE' for carbonflux variable                                                                      
-    hout  = _findfirststart(hpart, df.columns)
-    assert len(hout) == 4, 'Could not find CO2 flux (NEE or FC), SW_IN, TA, or VPD in input file.'
-    print('      Using:', hout)
-
-    suff = hout[0]                                                                                 #Change 20. Rename with the carbonflux variable              
- 
-    # nighttime method
-    print('      Nighttime partitioning')
-    dfpartn = hf.nee2gpp(df[hout], flag=dff[hout], isday=isday,
-                         undef=undef, method='reichstein',
-                         nogppnight=nogppnight)
-
-    dfpartn.rename(columns=lambda c: c + '_' + suff + '_rei', inplace=True)                        #Change 21. Add '_' before suff and change '1' with '_rei'
-        
-    # falge method                                                                                 #Change 22. Falge method integration
-    print('      Falge method')
-    dfpartf = hf.nee2gpp(df[hout], flag=dff[hout], isday=isday,
-                         undef=undef, method='falge',         
-                         nogppnight=nogppnight)  
-    
-    dfpartf.rename(columns=lambda c: c + '_' + suff + '_fal', inplace=True)
-    
-    # daytime method                                                                               #Change 23. Day time method 'lasslop' integration
-    print('      Daytime partitioning')
-    dfpartd = hf.nee2gpp(df[hout], flag=dff[hout], isday=isday,
-                         undef=undef, method='lasslop',
-                         nogppnight=nogppnight)
-    
-    dfpartd.rename(columns=lambda c: c  + '_' + suff + '_las', inplace=True) 
-
-    df = pd.concat([df, dfpartn, dfpartf, dfpartd],  axis=1)
-
-    # take flags from NEE or FC same flag
-    for dn in ['rei', 'fal', 'las']:
-        for gg in ['GPP', 'RECO']:                                                                 #Change 24. Adds '_' between labels
-            dff[gg + '_' + suff + '_'+ dn] = dff[hout[0]]                                          #Takes flags from the carbonflux variable
-            
-    # flag GPP and RECO if they were not calculated
-    for dn in ['rei', 'fal', 'las']:
-        for gg in ['GPP', 'RECO']:                                                                 #Change 25. This method flags with 2 value the 'RECO' columns when 'GPP was not calculated
-            dff.loc[df['GPP' + '_' + suff + '_'+ dn] == undef, gg + '_' + suff + '_'+ dn ] = 2     #('GPP' == undef)
-      
-    t32   = ptime.time()
-    strin = ( '{:.1f} [minutes]'.format((t32 - t31) / 60.)                                         #Change 26. Change legend of computation time.         
-              if (t32 - t31) > 60.
-              else '{:d} [seconds]'.format(int(t32 - t31))
-            )
-    print('\n')
-    print('     Computation flux partitioning detection in ', strin)  
-    print('\n')
-    
-#********************************************************************************************************************************************************************* 
-# 6)   Gap-filling
-if fill:        
-    print('6)   Gap-filling \n')
-    t41 = ptime.time()
-    
-    #Looking for meteorological data
-    hfill = ['SW_IN', 'TA', 'VPD']
-    hout  = _findfirststart(hfill, df.columns)
-    assert len(hout) == 3, 'Could not find SW_IN, TA or VPD in input file.'
-
-    # if available
-    rei_gpp = 'GPP_'+carbonflux+'_rei'
-    rei_res = 'RECO_'+carbonflux+'_rei'
-    fal_gpp = 'GPP_'+carbonflux+'_fal'
-    fal_res = 'RECO_'+carbonflux+'_fal'
-    las_gpp = 'GPP_'+carbonflux+'_las'
-    las_res = 'RECO_'+carbonflux+'_las'
-    
-    hfill = [ carbonflux,                                                                          #Change 27. Change names of columns to process
-              rei_gpp,rei_res,fal_gpp,fal_res,las_gpp,las_res,
-              'SW_IN', 'TA', 'VPD']
-    
-    hout  = _findfirststart(hfill, df.columns)
-    print('      Using:', hout)
-    
-    df_f, dff_f = hf.gapfill(df[hout], flag=dff[hout],
-                             sw_dev=sw_dev, ta_dev=ta_dev, vpd_dev=vpd_dev,
-                             longgap=longgap, undef=undef, err=False,
-                             verbose=1)
-    
-    #hdrop = ['SW_IN', 'TA', 'VPD']                           
-    #hout = _findfirststart(hdrop, df.columns)
-    #df_f.drop(columns=hout,  inplace=True)
-    #dff_f.drop(columns=hout, inplace=True)
-
-    def _add_f(c):
-        return '_'.join(c.split('_')[:-3] + c.split('_')[-3:]  + ['f'])                            #Change 28. 'f' of fill till the end of the name of the column names
-    df_f.rename(columns=_add_f,  inplace=True)
-    dff_f.rename(columns=_add_f, inplace=True)    
-    
-    df  = pd.concat([df,  df_f],  axis=1)
-    dff = pd.concat([dff, dff_f], axis=1)
-    
-    t42   = ptime.time()                                                                           #Change 29. Change legend of computation time.
-    strin = ( '{:.1f} [minutes]'.format((t42 - t41) / 60.)                                           
-              if (t42 - t41) > 60.
-              else '{:d} [seconds]'.format(int(t42 - t41))
-            )
-    print('\n')
-    print('     Computation filling gaps detection in ', strin) 
-    print('\n')
-    
-#********************************************************************************************************************************************************************* 
-# 7)   Error estimate
-if fluxerr:
-    print('7)   Flux error estimates \n')
-    t51 = ptime.time()
-    
-    #Looking for meteorological data
-    hfill = ['SW_IN', 'TA', 'VPD']
-    hout  = _findfirststart(hfill, df.columns)
-    assert len(hout) == 3, 'Could not find SW_IN, TA or VPD in input file.'
-
-    # if available 
-    rei_gpp = 'GPP_'+carbonflux+'_rei'
-    rei_res = 'RECO_'+carbonflux+'_rei'
-    fal_gpp = 'GPP_'+carbonflux+'_fal'
-    fal_res = 'RECO_'+carbonflux+'_fal'
-    las_gpp = 'GPP_'+carbonflux+'_las'
-    las_res = 'RECO_'+carbonflux+'_las'
-    
-    hfill = [ carbonflux,                                                                          #Change 30. Change names of columns to process
-              rei_gpp,rei_res,fal_gpp,fal_res,las_gpp,las_res,
-              'SW_IN', 'TA', 'VPD']
-    
-    hout  = _findfirststart(hfill, df.columns)
-    print('      Using:', hout)
-    
-    df_e = hf.gapfill(df[hout], flag=dff[hout],
-                      sw_dev=sw_dev, ta_dev=ta_dev, vpd_dev=vpd_dev,
-                      longgap=longgap, undef=undef, err=True, 
-                      verbose=1)
-    
-    hdrop = ['SW_IN', 'TA', 'VPD']
-    hout = _findfirststart(hdrop, df.columns)
-    df_e.drop(columns=hout, inplace=True)
-
-    def _add_e(c):                                                                                 #Change 31. Create _add_e instead of reusing _add_f
-        return '_'.join(c.split('_')[:-3] + c.split('_')[-3:] + ['e'])
-
-    # rename the variables with e (error)
-    colin  = list(df_e.columns)
-    df_e.rename(columns=_add_e,  inplace=True)
-    colout = list(df_e.columns)                                                                    #List with updated names to display in the dff file
-    df     = pd.concat([df, df_e], axis=1)
-    
-    # take flags of non-error columns with the same label
-    for cc in range(len(colin)):
-        dff[colout[cc]] = dff[colin[cc]]
-
-    t52   = ptime.time()                                                                           #Change 32. Change legend of computation time.
-    strin = ( '{:.1f} [minutes]'.format((t52 - t51) / 60.)                                           
-              if (t52 - t51) > 60.
-              else '{:d} [seconds]'.format(int(t52 - t51))
-            )
-    print('\n')
-    print('     Computation flux error estimates in ', strin) 
-    print('\n')
-    
-#********************************************************************************************************************************************************************* 
-# 8)   Output
-print('8)   Outputfile \n')
-t61 = ptime.time()
-
-if not outputfile:
-    try:
-        outputdir = hf.directory_from_gui(initialdir='.',
-                                          title='Output directory')
-    except:
-        raise IOError("GUI for output directory failed.")
-        
-    outputfile = configfile[:configfile.rfind('.')]                                                #Takes the name from the configurtion file
-    outputfile = outputdir + '/' + ID + '_' + os.path.basename(outputfile + '.xlsx')               #Change 33. Change outdir for outputdir to select directly the output folder
-else:
-    outputfile = outputdir +  outputfile + ID + '_' +  outputname                                  #Change 34. Create outputfile in case outputfile and outputdir are available 
-    
-print('      Write output ', outputfile)
-
-# Back to original units
-hta = ['TA']
-hout = _findfirststart(hta, df.columns)
-df.loc[dff[hout[0]] == 0, hout[0]] -= tkelvin
-hvpd = ['VPD']
-hout = _findfirststart(hvpd, df.columns)
-df.loc[dff[hout[0]] == 0, hout[0]] /= vpdpa
-
-if outundef:
-    print('      Set flags to undef.')
-    for cc in df.columns:
-        if cc.split('_')[-1] != 'f' and cc.split('_')[-1] != 'e':  # exclude gap-filled columns    #Change 35. Change [-4] for [-1] and exclude error 'e' columns
-            df[cc].where(dff[cc] == 0, other=undef, inplace=True)  # Is the & working?             #This line writes undef (-9999.) for all the flagged data
-
-if outflagcols:
-    print('      Add flag columns.')
-
-    def _add_flag(c):
-        return 'flag_' + c
-    dff.rename(columns=_add_flag, inplace=True)
-    
-    # no flag columns for flags
-    dcol = []
-    for hh in dff.columns:
-        if '_TEST' in hh:                                                                          #Avoids bringing _TEST data from dff which is an data columnd only with zero values not connected to the datasets                                                                 #Change 36. Change '_TEST_' for '_TEST'
-            dcol.append(hh)
-    if dcol:
-        dff.drop(columns=dcol, inplace=True)                                                       #Remove the TEST columns
-    df = pd.concat([df, dff], axis=1)
-    
-else:
-    print('      Add flag columns for gap-filled variables.')
-    occ = []
-    for cc in df.columns:
-        if cc.split('_')[-1] == 'f' or cc.split('_')[-1] == 'e':                                   #Change 37. Add the error columns 'e' in the condition
-            occ.append(cc)                                                                         #Selects only flags for _f or _e
-    dff1 = dff[occ].copy(deep=True)                                                               
-    dff1.rename(columns=lambda c: 'flag_' + c, inplace=True)
-    df = pd.concat([df, dff1], axis=1)
-
-print('      Write.')
-
-#df.to_csv(outputfile, sep=sep, na_rep=str(undef), index=True, date_format=timeformat)
-df.to_excel(outputfile)
-
-t62   = ptime.time()
-strin = ( '{:.1f} [minutes]'.format((t62 - t61) / 60.)                                             #Change 37. Change legend of computation time.          
-          if (t62 - t61) > 60.
-          else '{:d} [seconds]'.format(int(t62 - t61))
-        )
-print('\n')
-print('     Creating output file in ', strin) 
-print('\n')
-
-#********************************************************************************************************************************************************************* 
-# Next elements are complement modules to compute Remote Sensing empirical models of GPP           #Change 39. All below code is extra code to derive empirical models
+if calculated_gpp:
 #*********************************************************************************************************************************************************************
-# 9)   Daily estimations 
-if daily_gpp:                                                                                       
-    print('9)   Daily GPP \n')
-    t71 = ptime.time()
-
-    # Daily GPP and enviromental drivers
-    gpp = df.copy()
+    #2)   Setting data fram
+    print('2-9) Reading GPP file \n')
+    t01 = ptime.time()
     
-    gpp = gpp[(gpp[carbonflux+'_f'] < carbonfluxlimit) & (gpp[carbonflux+'_f'] > -carbonfluxlimit)]                                                           #These parameters are set to avoid having fluxing carboxes beyond specific established limits.
-    gpp = gpp[(gpp[rei_res+'_f'] < respirationlimit) & (gpp[rei_res+'_f'] > -respirationlimit)] 
+    df_nee_name  = outputdir +  outputfile + ID + '_' +  outputname
+    parser = lambda date: dt.datetime.strptime(date, timeformat)                               
+
+                                                                                                                                                                 
+    df = pd.read_csv(df_nee_name, parse_dates=[0], 
+                     date_parser=parser, index_col=0, header=0)
     
-    gpp_mean = gpp[['TA_f','VPD_f','SW_IN_f']]
-    gpp_sum  = gpp[[carbonflux+'_f',rei_gpp+'_f',rei_res+'_f',fal_gpp+'_f',fal_res+'_f',las_gpp+'_f',las_res+'_f']] * 12 * 30 * 60 /1000000
-
-    gpp_mean = gpp_mean.reset_index()
-    gpp_sum  = gpp_sum.reset_index()
-
-    gpp_mean['date']  =  gpp_mean['TIMESTAMP_START'].dt.date
-    gpp_sum ['date']  =  gpp_sum['TIMESTAMP_START'].dt.date
+    #df           = pd.read_csv(df_nee_name, index_col=0, header=0)
     
-    gpp_mean.replace(undef, np.nan, inplace=True)
-    gpp_sum.replace(undef, np.nan, inplace=True) 
+    df_gpp_name  = outputdir + "/GPP_output/" + ID + "_GPP_daily.csv"
+    parser = lambda date: dt.datetime.strptime(date, "%Y-%m-%d")                               
 
-    gpp_mean_daily = gpp_mean.groupby('date').mean()
-    gpp_sum_daily  = gpp_sum.groupby('date').sum()
-
-    df_gpp = pd.concat([gpp_mean_daily, gpp_sum_daily], axis=1)
-
-    # identify beggining and end of the time series
-    df_time = df_gpp.reset_index()
-    time1 = df_time.iloc[0, 0]
-    time2 = df_time.iloc[df_gpp.shape[0] -1,0]
-
-    # create time series with daily frequency (Not needed if usinf gap filled variables)
-    time_series = pd.date_range(time1, time2, freq="D")
-    time_series = pd.DataFrame(time_series).rename(columns={0: 'date'}).set_index('date')
-    df_gpp_time = pd.merge(left= time_series, right = df_gpp,
-                             how="left", left_index = True , right_index = True)
-
-    # smoth time series  
-    #df_gpp_smoth  = df_gpp_smoth.interpolate(method='akima', order=1, limit_direction ='backward')
-    df_gpp_smoth  = df_gpp_time.interpolate(method='akima', order=1, limit_direction ='forward')
-    df_gpp_smoth  = df_gpp_smoth.rolling(rolling_window_gpp, center=rolling_center_gpp, min_periods=rolling_min_periods).mean()
-
-    # save file of daily GPP
-    df_gpp_smoth.to_excel(outputdir + "/GPP_output/" + ID + "_GPP_daily.xlsx")
+                                                                                                                                                                 
+    df_gpp_smoth = pd.read_csv(df_gpp_name, parse_dates=[0], 
+                     date_parser=parser, index_col=0, header=0)
     
-    # save time series plot
-    model = '_rei_f'
-
-    data_ec        = df_gpp_smoth.reset_index()
-    data_co_fluxes = data_ec[['date','GPP_'+carbonflux+ model]].copy()
-    data_co_fluxes = data_co_fluxes.rename(columns={
-        'GPP_'+carbonflux + model: 'GPP (gC m-2 day-1)',
-    })
-    data_co_fluxes.head(10)
-
-    chart = alt.Chart(data_co_fluxes).mark_bar(size=1).encode(
-        x='date:T',
-        y='GPP (gC m-2 day-1):Q',
-        color=alt.Color(
-            'GPP (gC m-2 day-1):Q', scale=alt.Scale(scheme='redyellowgreen', domain=(0, 10))),
-        tooltip=[
-            alt.Tooltip('date:T', title='Date'),
-            alt.Tooltip('GPP (gC m-2 day-1):Q', title='GPP (gC m-2 day-1)')
-        ]).properties(width=600, height=300)
-
-    chart.save(outputdir + "/GPP_output/" + ID + "_GPP_daily.html")
+    #df_gpp_smoth = pd.read_csv(df_gpp_name, index_col=0, header=0)
     
-    t72   = ptime.time()
-    strin = ( '{:.1f} [minutes]'.format((t72 - t71) / 60.)                                                      
-              if (t72 - t71) > 60.
-              else '{:d} [seconds]'.format(int(t72 - t71))
+    t02   = ptime.time()                                                                               
+    strin = ( '{:.1f} [minutes]'.format((t02 - t01) / 60.)                                           
+              if (t02 - t01) > 60.
+              else '{:d} [seconds]'.format(int(t02 - t01))
             )
-    print('     Computed daily GPP in ', strin) 
-    print('\n')
+    print('     Reading file in ', strin , end='\n')
+    print('\n')        
     
 #********************************************************************************************************************************************************************* 
-# Finish Correction of Data with the Hesseflux package 
 t2   = ptime.time()                                                                                #Change 38. Change legend of computation time.
 strin = ( '{:.1f} [minutes]'.format((t2 - t1) / 60.)                                            
           if (t2 - t1) > 60.
           else '{:d} [seconds]'.format(int(t2 - t1))
         )
-print('Total time of correction of data ', strin) 
+print('Total time processing carbon data', strin) 
 print('\n')
-#********************************************************************************************************************************************************************* 
 
 
 # # Plot eddy covariance fluxes and GPP
 
 # Daily GPP
 
-# In[6]:
+# In[204]:
 
 
-# save time series
-model = '_rei_f'
+# model = '_rei_f'
 
-data_ec        = df_gpp_smoth.reset_index()
-data_co_fluxes = data_ec[['date','GPP_'+carbonflux+ model]].copy()
-data_co_fluxes = data_co_fluxes.rename(columns={
-    'GPP_'+carbonflux + model: 'GPP (gC m-2 day-1)',
-})
-data_co_fluxes.head(10)
+# data_ec        = df_gpp_smoth.reset_index()
+# data_co_fluxes = data_ec[['date','GPP_'+carbonflux+ model]].copy()
+# data_co_fluxes = data_co_fluxes.rename(columns={
+#     'GPP_'+carbonflux + model: 'GPP (gC m-2 day-1)',
+# })
+# data_co_fluxes.head(10)
 
-chart = alt.Chart(data_co_fluxes).mark_bar(size=1).encode(
-    x='date:T',
-    y='GPP (gC m-2 day-1):Q',
-    color=alt.Color(
-        'GPP (gC m-2 day-1):Q', scale=alt.Scale(scheme='redyellowgreen', domain=(0, 10))),
-    tooltip=[
-        alt.Tooltip('date:T', title='Date'),
-        alt.Tooltip('GPP (gC m-2 day-1):Q', title='GPP (gC m-2 day-1)')
-    ]).properties(width=600, height=300)
+# chart = alt.Chart(data_co_fluxes).mark_bar(size=1).encode(
+#     x='date:T',
+#     y='GPP (gC m-2 day-1):Q',
+#     color=alt.Color(
+#         'GPP (gC m-2 day-1):Q', scale=alt.Scale(scheme='redyellowgreen', domain=(0, 10))),
+#     tooltip=[
+#         alt.Tooltip('date:T', title='Date'),
+#         alt.Tooltip('GPP (gC m-2 day-1):Q', title='GPP (gC m-2 day-1)')
+#     ]).properties(width=600, height=300)
 
-chart.save(outputdir + "/GPP_output/" + ID + "_GPP_daily.html")
-chart
+# chart.save(outputdir + "/GPP_output/" + ID + "_GPP_daily.html")
+# chart
 
 # #--------------------------------------------------------------------------------------------
 # fig, axes=plt.subplots(figsize=(13,7))
@@ -1044,7 +1084,7 @@ chart
 # gpp_analysis_C = gpp_analysis_A.copy().sum()
 
 
-# In[7]:
+# In[205]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -1281,7 +1321,7 @@ if climatological_footprint:
 
 # # Plot climatological footprint
 
-# In[8]:
+# In[206]:
 
 
 # for i in years:
@@ -1292,512 +1332,534 @@ if climatological_footprint:
 #                c='black', alpha=0.2, label='20')
 
 
-# In[12]:
+# In[207]:
 
 
-#*********************************************************************************************************************************************************************     
-if vegetation_indices:
-    
-    print('11)   Vegetation indices time series \n')
-    t91 = ptime.time()
+#*********************************************************************************************************************************************************************
+if not calculated_vi:
+    #*********************************************************************************************************************************************************************     
+    if vegetation_indices:
 
-    import ee
-    #ee.Authenticate() #For authentifications we require a Google Account registered in GEE (https://earthengine.google.com/)
-    ee.Initialize()  
-    
-    # create climatological footprint as ee object
-    for i in years:
-        print('       Creating climatological footprint for %d \n'%i) 
-        # create geometries 
-        for n in range(len(rst_var)):
-                
-            df = globals()['footprint_%s_%d' %(int(rst_var[n]),i)].to_numpy().tolist()
-            globals()['df_%s_%d_poly' %(int(rst_var[n]),i)] = ee.Geometry.Polygon(coords = df)
-            print('       Transforming df_%s_%d_poly' %(int(rst_var[n]),i))
+        print('11)   Vegetation indices time series \n')
+        t91 = ptime.time()
 
-        lon_lat         =  [longitude, latitude]
+        #ee.Authenticate() #For authentifications we require a Google Account registered in GEE (https://earthengine.google.com/)
+        ee.Initialize()  
+
+        # create climatological footprint as ee object
+        for i in years:
+            print('       Creating climatological footprint for %d \n'%i) 
+            # create geometries 
+            for n in range(len(rst_var)):
+
+                df = globals()['footprint_%s_%d' %(int(rst_var[n]),i)].to_numpy().tolist()
+                globals()['df_%s_%d_poly' %(int(rst_var[n]),i)] = ee.Geometry.Polygon(coords = df)
+                print('       Transforming df_%s_%d_poly' %(int(rst_var[n]),i))
+
+            lon_lat         =  [longitude, latitude]
+            point = ee.Geometry.Point(lon_lat)
+            globals()['df_fetch_%s_poly' %i]   = point.buffer(fetch)
+            print('       Transforming df_fetch_%s_poly' %i)
+
+            # create areas
+            globals()['area_%s_%d' %(int(rst_var[0]),i)] = globals()['df_%s_%d_poly' %(int(rst_var[0]),i)]
+            print('       Creating area_%s_%d' %(int(rst_var[0]),i))
+
+
+            for n in range(len(rst_var)-1):
+                globals()['area_%s_%d' %(int(rst_var[n+1]),i)]  = globals()['df_%s_%d_poly' %(int(rst_var[n+1]),i)].difference(globals()['df_%s_%d_poly' %(int(rst_var[n]),i)])
+                print('       Creating area_%s_%d' %(int(rst_var[n+1]),i))  
+
+            globals()['area_100_%d' %(i)]  = globals()['df_fetch_%s_poly' %i].difference(globals()['df_%s_%d_poly' %(int(rst_var[-1]),i)])
+            print('       Creating area_100_%d ' %(i))
+            print('\n') 
+
+        # create range according to data in the input datafiles   
+        start   = '%s-01-01'   %(years[0])                                              #2017-05-12 starts frequency of 10 days                                               
+        end     = '%s-12-31'   %(years[-1])                                             #2017-12-18 starts frequency of 5 days
+        timeSD  = [start, end]
+
+        # create coordinates of the eddy covariance tower
+        lon_lat         =  [longitude, latitude]         
         point = ee.Geometry.Point(lon_lat)
-        globals()['df_fetch_%s_poly' %i]   = point.buffer(fetch)
-        print('       Transforming df_fetch_%s_poly' %i)
-        
-        # create areas
-        globals()['area_%s_%d' %(int(rst_var[0]),i)] = globals()['df_%s_%d_poly' %(int(rst_var[0]),i)]
-        print('       Creating area_%s_%d' %(int(rst_var[0]),i))
-        
-        
-        for n in range(len(rst_var)-1):
-            globals()['area_%s_%d' %(int(rst_var[n+1]),i)]  = globals()['df_%s_%d_poly' %(int(rst_var[n+1]),i)].difference(globals()['df_%s_%d_poly' %(int(rst_var[n]),i)])
-            print('       Creating area_%s_%d' %(int(rst_var[n+1]),i))  
 
-        globals()['area_100_%d' %(i)]  = globals()['df_fetch_%s_poly' %i].difference(globals()['df_%s_%d_poly' %(int(rst_var[-1]),i)])
-        print('       Creating area_100_%d ' %(i))
-        print('\n') 
+        # collections google earth engine    
+        COPERNICUS_S2_L2A = 'COPERNICUS/S2_SR_HARMONIZED'        #Multi-spectral surface reflectances (https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR)
+        MODIS_temp        = 'MODIS/006/MOD11A1'                  #Land surface temperature (https://developers.google.com/earth-engine/datasets/catalog/MODIS_006_MOD11A1)
+        USAID_prec        = 'UCSB-CHG/CHIRPS/DAILY'              #InfraRed Precipitation with Station dat (https://developers.google.com/earth-engine/datasets/catalog/UCSB-CHG_CHIRPS_DAILY)
+        MODIS_GPP         = 'MODIS/006/MOD17A2H'                 #Gross primary productivity(https://developers.google.com/earth-engine/datasets/catalog/MODIS_006_MOD17A2H)
+        MODIS_NPP         = 'MODIS/006/MOD17A3HGF'               #Net primary productivity (https://developers.google.com/earth-engine/datasets/catalog/MODIS_006_MOD17A3HGF)
 
-    # create range according to data in the input datafiles   
-    start   = '%s-01-01'   %(years[0])                                              #2017-05-12 starts frequency of 10 days                                               
-    end     = '%s-12-31'   %(years[-1])                                             #2017-12-18 starts frequency of 5 days
-    timeSD  = [start, end]
+        # bands of the EO products used in the analysis
+        # image.bandNames().getInfo() can be used to request bands of colections as well
+        COPERNICUS_S2_bands = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9', 'B11', 'B12', 'AOT', 'WVP', 'SCL', 'TCI_R', 'TCI_G', 'TCI_B', 'QA10', 'QA20', 'QA60']
+        MODIS_temp_bands    = ['LST_Day_1km','QC_Day','Day_view_time','Day_view_angle','LST_Night_1km','QC_Night','Night_view_time','Night_view_angle','Emis_31','Emis_32','Clear_day_cov','Clear_night_cov']
+        USAID_prec_bands    = ['precipitation']
+        MODIS_GPP_bands     = ['Gpp', 'PsnNet', 'Psn_QC']
+        MODIS_NPP_bands     = ['Npp', 'Npp_QC']
 
-    # create coordinates of the eddy covariance tower
-    lon_lat         =  [longitude, latitude]         
-    point = ee.Geometry.Point(lon_lat)
+        # function to load data set with specified period and location
+        def load_catalog(catalog, time, location, bands):
+            dataset = ee.ImageCollection(catalog).filterDate(time[0],time[1]).filterBounds(location).select(bands)
+            return dataset
 
-    # collections google earth engine    
-    COPERNICUS_S2_L2A = 'COPERNICUS/S2_SR'                   #Multi-spectral surface reflectances (https://developers.google.com/earth-engine/datasets/catalog/COPERNICUS_S2_SR)
-    MODIS_temp        = 'MODIS/006/MOD11A1'                  #Land surface temperature (https://developers.google.com/earth-engine/datasets/catalog/MODIS_006_MOD11A1)
-    USAID_prec        = 'UCSB-CHG/CHIRPS/DAILY'              #InfraRed Precipitation with Station dat (https://developers.google.com/earth-engine/datasets/catalog/UCSB-CHG_CHIRPS_DAILY)
-    MODIS_GPP         = 'MODIS/006/MOD17A2H'                 #Gross primary productivity(https://developers.google.com/earth-engine/datasets/catalog/MODIS_006_MOD17A2H)
-    MODIS_NPP         = 'MODIS/006/MOD17A3HGF'               #Net primary productivity (https://developers.google.com/earth-engine/datasets/catalog/MODIS_006_MOD17A3HGF)
-    
-    # bands of the EO products used in the analysis
-    # image.bandNames().getInfo() can be used to request bands of colections as well
-    COPERNICUS_S2_bands = ['B1', 'B2', 'B3', 'B4', 'B5', 'B6', 'B7', 'B8', 'B8A', 'B9', 'B11', 'B12', 'AOT', 'WVP', 'SCL', 'TCI_R', 'TCI_G', 'TCI_B', 'QA10', 'QA20', 'QA60']
-    MODIS_temp_bands    = ['LST_Day_1km','QC_Day','Day_view_time','Day_view_angle','LST_Night_1km','QC_Night','Night_view_time','Night_view_angle','Emis_31','Emis_32','Clear_day_cov','Clear_night_cov']
-    USAID_prec_bands    = ['precipitation']
-    MODIS_GPP_bands     = ['Gpp', 'PsnNet', 'Psn_QC']
-    MODIS_NPP_bands     = ['Npp', 'Npp_QC']
+        # cloud coverage filter function
+        def cloud_filter(collection, cloud_coverage_metadata_name, threshold):
+            collection_cf = collection.filterMetadata(cloud_coverage_metadata_name,'less_than', threshold)
+            return collection_cf
 
-    # function to load data set with specified period and location
-    def load_catalog(catalog, time, location, bands):
-        dataset = ee.ImageCollection(catalog).filterDate(time[0],time[1]).filterBounds(location).select(bands)
-        return dataset
+        # function to derive VIs
+        def calculateVI(image):
+            '''This method calculates different vegetation indices in a image collection and adds their values as new bands'''
 
-    # cloud coverage filter function
-    def cloud_filter(collection, cloud_coverage_metadata_name, threshold):
-        collection_cf = collection.filterMetadata(cloud_coverage_metadata_name,'less_than', threshold)
-        return collection_cf
-    
-    # function to derive VIs
-    def calculateVI(image):
-        '''This method calculates different vegetation indices in a image collection and adds their values as new bands'''
+            # defining dictionary of bands Sentinel-2 
+            dict_bands = {
 
-        # defining dictionary of bands Sentinel-2 
-        dict_bands = {
+                "blue"  :  'B2',                              #Blue band                        
+                "green" :  'B3',                              #Green band
+                "red"   :  'B4',                              #Red band
+                "red1"  :  'B5',                              #Red-edge spectral band   
+                "red2"  :  'B6',                              #Red-edge spectral band
+                "red3"  :  'B7',                              #Red-edge spectral band    
+                "NIR"   :  'B8',                              #Near-infrared band
+                "NIRn"  :  'B8A',                             #Near-infrared narrow
+                "WV"    :  'B9',                              #Water vapour
+                "SWIR1" :  'B11',                             #Short wave infrared 1
+                "SWIR2" :  'B12',                             #Short wave infrared 2
+            }
 
-            "blue"  :  'B2',                              #Blue band                        
-            "green" :  'B3',                              #Green band
-            "red"   :  'B4',                              #Red band
-            "red1"  :  'B5',                              #Red-edge spectral band   
-            "red2"  :  'B6',                              #Red-edge spectral band
-            "red3"  :  'B7',                              #Red-edge spectral band    
-            "NIR"   :  'B8',                              #Near-infrared band
-            "NIRn"  :  'B8A',                             #Near-infrared narrow
-            "WV"    :  'B9',                              #Water vapour
-            "SWIR1" :  'B11',                             #Short wave infrared 1
-            "SWIR2" :  'B12',                             #Short wave infrared 2
-        }
-        
-        # specify bands 
-        dict  = dict_bands
-        blue  = dict["blue"]                              #Blue band                        
-        green = dict["green"]                             #Green band
-        red   = dict["red"]                               #Red band
-        red1  = dict["red1"]                              #Red-edge spectral band    
-        red2  = dict["red2"]                              #Red-edge spectral band
-        red3  = dict["red3"]                              #Red-edge spectral band
-        NIR   = dict["NIR"]                               #Near-infrared band
-        NIRn  = dict["NIRn"]                              #Near-infrared band
-        WV    = dict["WV"]                                #Water vapour
-        SWIR1 = dict["SWIR1"]                             #Short wave infrared 1
-        SWIR2 = dict["SWIR2"]                             #Short wave infrared 2
+            # specify bands 
+            dict  = dict_bands
+            blue  = dict["blue"]                              #Blue band                        
+            green = dict["green"]                             #Green band
+            red   = dict["red"]                               #Red band
+            red1  = dict["red1"]                              #Red-edge spectral band    
+            red2  = dict["red2"]                              #Red-edge spectral band
+            red3  = dict["red3"]                              #Red-edge spectral band
+            NIR   = dict["NIR"]                               #Near-infrared band
+            NIRn  = dict["NIRn"]                              #Near-infrared band
+            WV    = dict["WV"]                                #Water vapour
+            SWIR1 = dict["SWIR1"]                             #Short wave infrared 1
+            SWIR2 = dict["SWIR2"]                             #Short wave infrared 2
 
-        bands_for_expressions = {
-            
-            'blue'  : image.select(blue).divide(10000),
-            'green' : image.select(green).divide(10000), 
-            'red'   : image.select(red).divide(10000),
-            'red1'  : image.select(red1).divide(10000), 
-            'red2'  : image.select(red2).divide(10000),
-            'red3'  : image.select(red3).divide(10000), 
-            'NIR'   : image.select(NIR).divide(10000),
-            'NIRn'  : image.select(NIRn).divide(10000),
-            'WV'    : image.select(WV).divide(10000),
-            'SWIR1' : image.select(SWIR1).divide(10000),
-            'SWIR2' : image.select(SWIR2).divide(10000)}
+            bands_for_expressions = {
 
-        # greeness related indices
-        # NDVI                                                                            (Rouse et al., 1974)
-        NDVI  = image.normalizedDifference([NIR, red]).rename("NDVI") 
-        
-        # EVI                                                                             
-        EVI   = image.expression('2.5*(( NIR - red ) / ( NIR + 6 * red - 7.5 * blue + 1 ))', 
-                bands_for_expressions).rename("EVI")
-        # EVI2                                                                            (Jiang et al., 2008)
-        EVI2  = image.expression('2.5*(( NIR - red ) / ( NIR + 2.4 * red + 1 ))', 
-                bands_for_expressions).rename("EVI2")
-        
-        # greeness related indices with Sentinel-2 narrow bands / Red-edge
-        # Clr
-        CLr  = image.expression('(red3/red1)-1', bands_for_expressions).rename("CLr")
-        # Clg
-        Clg  = image.expression('(red3/green)-1', bands_for_expressions).rename("CLg")
-        # MTCI
-        MTCI = image.expression('(red2-red1)/(red1-red)', bands_for_expressions).rename("MTCI")
-        # MNDVI                                                                          (Add reference)
-        MNDVI = image.normalizedDifference([red3, red1]).rename("MNDVI")    
-        
-        # water related indices
-        # MNDWI                                                                          (Add reference)
-        MNDWI = image.normalizedDifference([green, SWIR1]).rename("MNDWI")    
-        # NDWI OR LSWI or NDII or NDMI                                                    (Add reference)
-        LSWI  = image.normalizedDifference([NIR, SWIR1]).rename("LSWI")
-        # NDII                                                                            (Hunt & Qu, 2013)
-        NDII   = image.normalizedDifference([NIR, SWIR2]).rename("NDII")
- 
-        image1 = image.addBands(NDVI).addBands(EVI).addBands(EVI2)
-        image2 = image1.addBands(CLr).addBands(Clg).addBands(MTCI).addBands(MNDVI)
-        image3 = image2.addBands(MNDWI).addBands(LSWI).addBands(NDII)
+                'blue'  : image.select(blue).divide(10000),
+                'green' : image.select(green).divide(10000), 
+                'red'   : image.select(red).divide(10000),
+                'red1'  : image.select(red1).divide(10000), 
+                'red2'  : image.select(red2).divide(10000),
+                'red3'  : image.select(red3).divide(10000), 
+                'NIR'   : image.select(NIR).divide(10000),
+                'NIRn'  : image.select(NIRn).divide(10000),
+                'WV'    : image.select(WV).divide(10000),
+                'SWIR1' : image.select(SWIR1).divide(10000),
+                'SWIR2' : image.select(SWIR2).divide(10000)}
 
-        return image3  
-    
-    # function for masking non-vegetation areas
-    def maskS2nonvegetation(image):
+            # greeness related indices
+            # NDVI                                                                            (Rouse et al., 1974)
+            NDVI  = image.normalizedDifference([NIR, red]).rename("NDVI") 
 
-        qa    = image.select('QA60')
-        scl   = image.select('SCL')
-        ndvi  = image.select('NDVI')
-        mndvi = image.select('MNDVI')
+            # EVI                                                                             
+            EVI   = image.expression('2.5*(( NIR - red ) / ( NIR + 6 * red - 7.5 * blue + 1 ))', 
+                    bands_for_expressions).rename("EVI")
+            # EVI2                                                                            (Jiang et al., 2008)
+            EVI2  = image.expression('2.5*(( NIR - red ) / ( NIR + 2.4 * red + 1 ))', 
+                    bands_for_expressions).rename("EVI2")
 
-        cloudBitMask = 1 << 10
-        cirrusBitMask = 1 << 11
+            # greeness related indices with Sentinel-2 narrow bands / Red-edge
+            # Clr
+            CLr  = image.expression('(red3/red1)-1', bands_for_expressions).rename("CLr")
+            # Clg
+            Clg  = image.expression('(red3/green)-1', bands_for_expressions).rename("CLg")
+            # MTCI
+            MTCI = image.expression('(red2-red1)/(red1-red)', bands_for_expressions).rename("MTCI")
+            # MNDVI                                                                          (Add reference)
+            MNDVI = image.normalizedDifference([red3, red1]).rename("MNDVI")    
 
-        #vegetationMask1 = 4 # vegetation
-        #vegetationMask2 = 5 # non-vegetated
-        #vegetationMask3 = 6 # water
-        #vegetationMask4 = 7 # unclassified
+            # water related indices
+            # MNDWI                                                                          (Add reference)
+            MNDWI = image.normalizedDifference([green, SWIR1]).rename("MNDWI")    
+            # NDWI OR LSWI or NDII or NDMI                                                    (Add reference)
+            LSWI  = image.normalizedDifference([NIR, SWIR1]).rename("LSWI")
+            # NDII                                                                            (Hunt & Qu, 2013)
+            NDII   = image.normalizedDifference([NIR, SWIR2]).rename("NDII")
 
-        #ndviMask  = -100;   # set in the config file
-        #mndviMask = -100; 
-        
-        # this mask selects vegetation + non-vegetated + water + unclassified + areas with VIs (NDVI and MNDVI) greater that a threshold set in the configuration file
-        #mask = scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).And(qa.bitwiseAnd(cloudBitMask).eq(0)).And(qa.bitwiseAnd(cirrusBitMask).eq(0)).And(ndvi.gte(ndviMask)).And(mndvi.gte(mndviMask))
-        mask = scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).Or(scl.eq(11)).And(qa.bitwiseAnd(cloudBitMask).eq(0)).And(qa.bitwiseAnd(cirrusBitMask).eq(0)).And(ndvi.gte(ndviMask)).And(mndvi.gte(mndviMask))
-        #mask = scl.gte(4).And(qa.bitwiseAnd(cloudBitMask).eq(0)).And(qa.bitwiseAnd(cirrusBitMask).eq(0)).And(ndvi.gte(ndviMask)).And(mndvi.gte(mndviMask))
-        #mask = scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).And(mndvi.gte(0.05)) 
-        
-        vegetation = image.updateMask(mask)
+            image1 = image.addBands(NDVI).addBands(EVI).addBands(EVI2)
+            image2 = image1.addBands(CLr).addBands(Clg).addBands(MTCI).addBands(MNDVI)
+            image3 = image2.addBands(MNDWI).addBands(LSWI).addBands(NDII)
 
-        return vegetation
-    
-    # function to transform ee objects to dataframes pandas objects
-    # function that transforms arrays into dataframes
-    def ee_array_to_df(imagecollection, geometry, scale):
-        
-        """Transforms client-side ee.Image.getRegion array to pandas.DataFrame."""
-        
-        # select bands from the image collection
-        filtered = imagecollection.select(bands)
-        
-        # function that produce functions to reduce a region with atatistics (mean, max, min, etc.)
-        def create_reduce_region_function(geometry,
-                                          reducer=ee.Reducer.mean(),
-                                          scale=1000,
-                                          crs=crs,
-                                          bestEffort=True,
-                                          maxPixels=1e13,
-                                          tileScale=4):
+            return image3  
 
-              def reduce_region_function(img):
+        # function for masking non-vegetation areas
+        def maskS2nonvegetation(image):
 
-                stat = img.reduceRegion(
-                    reducer=reducer,
-                    geometry=geometry,
-                    scale=scale,
-                    crs=crs,
-                    bestEffort=bestEffort,
-                    maxPixels=maxPixels,
-                    tileScale=tileScale)
+            qa    = image.select('QA60')
+            scl   = image.select('SCL')
+            ndvi  = image.select('NDVI')
+            mndvi = image.select('MNDVI')
 
-                return ee.Feature(geometry, stat).set({'millis': img.date().millis()})
-              return reduce_region_function
-            
-        # function to transfer feature properties to a dictionary.
-        def fc_to_dict(fc):
-                prop_names = fc.first().propertyNames()
-                prop_lists = fc.reduceColumns(reducer=ee.Reducer.toList().repeat(prop_names.size()),selectors=prop_names).get('list')
+            cloudBitMask = 1 << 10
+            cirrusBitMask = 1 << 11
 
-                return ee.Dictionary.fromLists(prop_names, prop_lists)
-        
-        # creating reduction function (reduce_VI is a function)
-        reduce_VI = create_reduce_region_function(
-            geometry= geometry, reducer=ee.Reducer.mean(), scale=10, crs= crs)
-        
-        # transform image collection into feature collection (tables)
-        VI_stat_fc = ee.FeatureCollection(imagecollection.map(reduce_VI)).filter(
-            ee.Filter.notNull(imagecollection.first().bandNames()))
-        
-        # transform feature collection into dictionary object
-        VI_dict = fc_to_dict(VI_stat_fc).getInfo()
+            #vegetationMask1 = 4 # vegetation
+            #vegetationMask2 = 5 # non-vegetated
+            #vegetationMask3 = 6 # water
+            #vegetationMask4 = 7 # unclassified
+            #vegetationMask5 = 11 # snow
 
-        #print(type(VI_dict), '\n')
-        
-        #for prop in VI_dict.keys():
-        #    print(prop + ':', VI_dict[prop][0:3] + ['...'])
-        
-        # transform dictionary into dataframe
-        VI_df = pd.DataFrame(VI_dict)
-        
-        # convert column in datatime type object
-        #VI_df['datetime'] = pd.to_datetime(VI_df['time'], unit='ms')
-        VI_df['date']     = pd.to_datetime(VI_df['millis'], unit='ms').dt.date
-        
-        # generate a list with the names of each band of the collection 
-        list_of_bands = filtered.first().bandNames().getInfo()
-        
-        # remove rows without data inside.
-        VI_df = VI_df[['date', *list_of_bands]].dropna()
-        
-        # convert the data to numeric values.
-        for band in list_of_bands:
-            VI_df[band] = pd.to_numeric(VI_df[band], errors='coerce', downcast ='float')
-            
-        # convert the time field into a datetime.
-        #VI_df['datetime'] = pd.to_datetime(VI_df['time'], unit='ms')
-        #VI_df['date']     = pd.to_datetime(VI_df['time'], unit='ms').dt.date
+            # this mask selects vegetation + non-vegetated + water + unclassified + areas with VIs (NDVI and MNDVI) greater that a threshold set in the configuration file
+            #mask = scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).And(qa.bitwiseAnd(cloudBitMask).eq(0)).And(qa.bitwiseAnd(cirrusBitMask).eq(0)).And(ndvi.gte(ndviMask)).And(mndvi.gte(mndviMask))
+            mask = scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).Or(scl.eq(11)).And(qa.bitwiseAnd(cloudBitMask).eq(0)).And(qa.bitwiseAnd(cirrusBitMask).eq(0)).And(ndvi.gte(ndviMask)).And(mndvi.gte(mndviMask))
+            #mask = scl.gte(4).And(qa.bitwiseAnd(cloudBitMask).eq(0)).And(qa.bitwiseAnd(cirrusBitMask).eq(0)).And(ndvi.gte(ndviMask)).And(mndvi.gte(mndviMask))
+            #mask = scl.eq(4).Or(scl.eq(5)).Or(scl.eq(6)).Or(scl.eq(7)).And(mndvi.gte(0.05)) 
 
-        # keep the columns of interest.
-        #VI_df = VI_df[['datetime','date',  *list_of_bands]]
-        
-        # flag to identify if in the reduction there were pixels, or they were masked-removed
-        VI_df['flag'] = 100
-        
-        # reduction in case there are two pixels from different images for the same day
-        VI_df = VI_df.groupby('date').mean().reset_index().set_index('date').copy()
+            vegetation = image.updateMask(mask)
 
-        return VI_df
+            return vegetation
 
-    # applying functions 
+        # function to transform ee objects to dataframes pandas objects
+        # function that transforms arrays into dataframes
+        def ee_array_to_df(imagecollection, geometry, scale):
 
-    # request of catalogues 
-    S2     = load_catalog(COPERNICUS_S2_L2A, timeSD, point, COPERNICUS_S2_bands)
-    temp   = load_catalog(MODIS_temp,        timeSD, point, MODIS_temp_bands)
-    prec   = load_catalog(USAID_prec,        timeSD, point, USAID_prec_bands)
-    gpp_MODIS    = load_catalog(MODIS_GPP,         timeSD, point, MODIS_GPP_bands)
-    npp_MODIS    = load_catalog(MODIS_NPP,         timeSD, point,  MODIS_NPP_bands)
+            """Transforms client-side ee.Image.getRegion array to pandas.DataFrame."""
 
-    # filter cloud coverage
-    cloud_coverage_metadata_name = 'CLOUDY_PIXEL_PERCENTAGE'                     # name of metadata property indicating cloud coverage in %
+            # select bands from the image collection
+            filtered = imagecollection.select(bands)
 
-    # applying cloud filter 
-    S2_VI = cloud_filter(S2, cloud_coverage_metadata_name, max_cloud_coverage)   # max cloud coverage defined in the Config file
+            # function that produce functions to reduce a region with atatistics (mean, max, min, etc.)
+            def create_reduce_region_function(geometry,
+                                              reducer=ee.Reducer.mean(),
+                                              scale=1000,
+                                              crs=crs,
+                                              bestEffort=True,
+                                              maxPixels=1e13,
+                                              tileScale=4):
 
-    # calculation of vegetation indices for the collection
-    S2_VI = S2_VI.map(calculateVI)
-    
-    # applying mask 
-    S2_VI = S2_VI.map(maskS2nonvegetation)
+                  def reduce_region_function(img):
 
-    # select bands for the analysis of interdependency and regression models 
-    #bands = ['NDVI','EVI','EVI2','CLr','CLg','MTCI','MNDVI','MNDWI','LSWI','NDII']
-    #bands = ['NDVI','EVI','EVI2','CLr','MNDVI','MNDWI','LSWI','NDII']
+                    stat = img.reduceRegion(
+                        reducer=reducer,
+                        geometry=geometry,
+                        scale=scale,
+                        crs=crs,
+                        bestEffort=bestEffort,
+                        maxPixels=maxPixels,
+                        tileScale=tileScale)
 
-    # applying funtion ee_array_to_df for each climatological footprint
-    for i in years:
-        for n in range(len(rst_var)):
+                    return ee.Feature(geometry, stat).set({'millis': img.date().millis()})
+                  return reduce_region_function
 
-                area = globals()['area_%s_%d' %(int(rst_var[n]),i)]
-                globals()['S2_VI_df_area_%s_%d' %(int(rst_var[n]),i)]  = ee_array_to_df(S2_VI, area, 10)          
-                print('       Retrieving info from area_%s_%d into dataframe:' %(int(rst_var[n]),i))
-                print('       S2_VI_df_area_%s_%d' %(int(rst_var[n]),i))
+            # function to transfer feature properties to a dictionary.
+            def fc_to_dict(fc):
+                    prop_names = fc.first().propertyNames()
+                    prop_lists = fc.reduceColumns(reducer=ee.Reducer.toList().repeat(prop_names.size()),selectors=prop_names).get('list')
+
+                    return ee.Dictionary.fromLists(prop_names, prop_lists)
+
+            # creating reduction function (reduce_VI is a function)
+            reduce_VI = create_reduce_region_function(
+                geometry= geometry, reducer=ee.Reducer.mean(), scale=10, crs= crs)
+
+            # transform image collection into feature collection (tables)
+            VI_stat_fc = ee.FeatureCollection(imagecollection.map(reduce_VI)).filter(
+                ee.Filter.notNull(imagecollection.first().bandNames()))
+
+            # transform feature collection into dictionary object
+            VI_dict = fc_to_dict(VI_stat_fc).getInfo()
+
+            #print(type(VI_dict), '\n')
+
+            #for prop in VI_dict.keys():
+            #    print(prop + ':', VI_dict[prop][0:3] + ['...'])
+
+            # transform dictionary into dataframe
+            VI_df = pd.DataFrame(VI_dict)
+
+            # convert column in datatime type object
+            #VI_df['datetime'] = pd.to_datetime(VI_df['time'], unit='ms')
+            VI_df['date']     = pd.to_datetime(VI_df['millis'], unit='ms').dt.date
+
+            # generate a list with the names of each band of the collection 
+            list_of_bands = filtered.first().bandNames().getInfo()
+
+            # remove rows without data inside.
+            VI_df = VI_df[['date', *list_of_bands]].dropna()
+
+            # convert the data to numeric values.
+            for band in list_of_bands:
+                VI_df[band] = pd.to_numeric(VI_df[band], errors='coerce', downcast ='float')
+
+            # convert the time field into a datetime.
+            #VI_df['datetime'] = pd.to_datetime(VI_df['time'], unit='ms')
+            #VI_df['date']     = pd.to_datetime(VI_df['time'], unit='ms').dt.date
+
+            # keep the columns of interest.
+            #VI_df = VI_df[['datetime','date',  *list_of_bands]]
+
+            # flag to identify if in the reduction there were pixels, or they were masked-removed
+            VI_df['flag'] = 100
+
+            # reduction in case there are two pixels from different images for the same day
+            VI_df = VI_df.groupby('date').mean().reset_index().set_index('date').copy()
+
+            return VI_df
+
+        # applying functions 
+
+        # request of catalogues 
+        S2     = load_catalog(COPERNICUS_S2_L2A, timeSD, point, COPERNICUS_S2_bands)
+        temp   = load_catalog(MODIS_temp,        timeSD, point, MODIS_temp_bands)
+        prec   = load_catalog(USAID_prec,        timeSD, point, USAID_prec_bands)
+        gpp_MODIS    = load_catalog(MODIS_GPP,         timeSD, point, MODIS_GPP_bands)
+        npp_MODIS    = load_catalog(MODIS_NPP,         timeSD, point,  MODIS_NPP_bands)
+
+        # filter cloud coverage
+        cloud_coverage_metadata_name = 'CLOUDY_PIXEL_PERCENTAGE'                     # name of metadata property indicating cloud coverage in %
+
+        # applying cloud filter 
+        S2_VI = cloud_filter(S2, cloud_coverage_metadata_name, max_cloud_coverage)   # max cloud coverage defined in the Config file
+
+        # calculation of vegetation indices for the collection
+        S2_VI = S2_VI.map(calculateVI)
+
+        # applying mask 
+        S2_VI = S2_VI.map(maskS2nonvegetation)
+
+        # select bands for the analysis of interdependency and regression models 
+        #bands = ['NDVI','EVI','EVI2','CLr','CLg','MTCI','MNDVI','MNDWI','LSWI','NDII']
+        #bands = ['NDVI','EVI','EVI2','CLr','MNDVI','MNDWI','LSWI','NDII']
+
+        # applying funtion ee_array_to_df for each climatological footprint
+        for i in years:
+            for n in range(len(rst_var)):
+
+                    area = globals()['area_%s_%d' %(int(rst_var[n]),i)]
+                    globals()['S2_VI_df_area_%s_%d' %(int(rst_var[n]),i)]  = ee_array_to_df(S2_VI, area, 10)          
+                    print('       Retrieving info from area_%s_%d into dataframe:' %(int(rst_var[n]),i))
+                    print('       S2_VI_df_area_%s_%d' %(int(rst_var[n]),i))
 
 
-        area = globals()['area_100_%d' %i]
-        globals()['S2_VI_df_area_100_%d' %i]  = ee_array_to_df(S2_VI, area, 10) 
-        print('       Retrieving info from area_100_%d into dataframe:' %i)
-        print('       S2_VI_df_area_100_%d' %i)
-        print('\n')
+            area = globals()['area_100_%d' %i]
+            globals()['S2_VI_df_area_100_%d' %i]  = ee_array_to_df(S2_VI, area, 10) 
+            print('       Retrieving info from area_100_%d into dataframe:' %i)
+            print('       S2_VI_df_area_100_%d' %i)
+            print('\n')
 
-    # loop to derive a weighted value of each VI per climatological footprint
-    for i in years:
-        
-        # create an empty file
-        globals()['dfvi_%s'%i] = pd.DataFrame(columns=bands)
-        
-        for n in range(len(rst_var)):
+        # loop to derive a weighted value of each VI per climatological footprint
+        for i in years:
 
-                df = globals()['S2_VI_df_area_%s_%d' %(int(rst_var[n]),i)].multiply(0.2)  
-                print('       Concat S2_VI_df_area_%s_%d' %(int(rst_var[n]),i))
-                globals()['dfvi_%s'%i] = pd.concat([globals()['dfvi_%s'%i], df])
+            # create an empty file
+            globals()['dfvi_%s'%i] = pd.DataFrame(columns=bands)
 
-        df = globals()['S2_VI_df_area_100_%d' %i].multiply(0.2)
-        print('       Concat S2_VI_df_area_100_%d' %i)
-        globals()['dfvi_%s'%i] = pd.concat([globals()['dfvi_%s'%i] , df])
-        
-        globals()['S2_VI_ffp_%s'%i] = globals()['dfvi_%s'%i].groupby(globals()['dfvi_%s'%i].index).sum().rename_axis('date')
-        print('       Creating S2_VI_ffp_%s'%i)
-        print('\n') 
+            for n in range(len(rst_var)):
 
-    # loop to derive the mean value of the vegetation indixes per region and per year
-    for i in years:
+                    df = globals()['S2_VI_df_area_%s_%d' %(int(rst_var[n]),i)].multiply(contourlines_frequency)  
+                    print('       Concat S2_VI_df_area_%s_%d' %(int(rst_var[n]),i))
+                    globals()['dfvi_%s'%i] = pd.concat([globals()['dfvi_%s'%i], df])
 
-        globals()['dfvi_mean_%s'%i] = pd.DataFrame(columns=bands)
+            df = globals()['S2_VI_df_area_100_%d' %i].multiply(contourlines_frequency)
+            print('       Concat S2_VI_df_area_100_%d' %i)
+            globals()['dfvi_%s'%i] = pd.concat([globals()['dfvi_%s'%i] , df])
 
-        for n in range(len(rst_var)):
+            globals()['S2_VI_ffp_%s'%i] = globals()['dfvi_%s'%i].groupby(globals()['dfvi_%s'%i].index).sum().rename_axis('date')
+            print('       Creating S2_VI_ffp_%s'%i)
+            print('\n') 
 
-                df = globals()['S2_VI_df_area_%s_%d' %(int(rst_var[n]),i)].describe().loc['mean':'std',bands[0]: bands[-1]]                  
-                df.drop(['std'], inplace = True)
-                df['Index'] = int(rst_var[n])
-                df.set_index('Index', inplace = True)
-                globals()['dfvi_mean_%s'%i] = pd.concat([globals()['dfvi_mean_%s'%i], df])
+        # loop to derive the mean value of the vegetation indixes per region and per year
+        for i in years:
 
-        df = globals()['S2_VI_df_area_100_%d' %i].describe().loc['mean':'std',bands[0]: bands[-1]]
-        df.drop(['std'], inplace = True)
-        df['Index'] = int(100)
-        df.set_index('Index', inplace = True)
+            globals()['dfvi_mean_%s'%i] = pd.DataFrame(columns=bands)
 
-        globals()['dfvi_mean_%s'%i] = pd.concat(([globals()['dfvi_mean_%s'%i] , df]), axis = 0)
-        globals()['dfvi_mean_%s'%i].to_csv(outputdir + '/VI_output/' + ID + '_dfvi_mean_%s'%i+'.csv')
-        print('       Creating dfvi_mean_%s'%i)
-        print('\n') 
+            for n in range(len(rst_var)):
 
-    # loop to join each S2_VI_df in a single dataframe per year named as df_VI
-    df_VI = pd.DataFrame(columns=bands)
-    
-    ndvi_threshold = -100                                                            # Threshold applied in the time series. Not used in the analysis
+                    df = globals()['S2_VI_df_area_%s_%d' %(int(rst_var[n]),i)].describe().loc['mean':'std',bands[0]: bands[-1]]                  
+                    df.drop(['std'], inplace = True)
+                    df['Index'] = int(rst_var[n])
+                    df.set_index('Index', inplace = True)
+                    globals()['dfvi_mean_%s'%i] = pd.concat([globals()['dfvi_mean_%s'%i], df])
 
-    for i in years:
+            df = globals()['S2_VI_df_area_100_%d' %i].describe().loc['mean':'std',bands[0]: bands[-1]]
+            df.drop(['std'], inplace = True)
+            df['Index'] = int(100)
+            df.set_index('Index', inplace = True)
 
-        globals()['S2_VI_ffp_%s_join'%i] = globals()['S2_VI_ffp_%s'%i][globals()['S2_VI_ffp_%s'%i]['NDVI']>ndvi_threshold]
+            globals()['dfvi_mean_%s'%i] = pd.concat(([globals()['dfvi_mean_%s'%i] , df]), axis = 0)
+            globals()['dfvi_mean_%s'%i].to_csv(outputdir + '/VI_output/' + ID + '_dfvi_mean_%s'%i+'.csv')
+            print('       Creating dfvi_mean_%s'%i)
+            print('\n') 
 
-        def add_date_info(df):
+        # loop to join each S2_VI_df in a single dataframe per year named as df_VI
+        df_VI = pd.DataFrame(columns=bands)
 
-            df = df.reset_index()
-            df['date'] = pd.to_datetime(df['date'])
-            df['Year'] = pd.DatetimeIndex(df['date']).year
+        ndvi_threshold = -100                                                            # Threshold applied in the time series. Not used in the analysis
 
-            def timestamp(df):
-                df = df.timestamp()
+        for i in years:
+
+            globals()['S2_VI_ffp_%s_join'%i] = globals()['S2_VI_ffp_%s'%i][globals()['S2_VI_ffp_%s'%i]['NDVI']>ndvi_threshold]
+
+            def add_date_info(df):
+
+                df = df.reset_index()
+                df['date'] = pd.to_datetime(df['date'])
+                df['Year'] = pd.DatetimeIndex(df['date']).year
+
+                def timestamp(df):
+                    df = df.timestamp()
+                    return df
+
+                df['timestamp'] = df['date'].apply(timestamp)
+                df = df.set_index('date')
+
                 return df
 
-            df['timestamp'] = df['date'].apply(timestamp)
-            df = df.set_index('date')
-            
-            return df
+            globals()['S2_VI_ffp_%s_join'%i]  = add_date_info(globals()['S2_VI_ffp_%s_join'%i] )
+            globals()['S2_VI_ffp_%s_join'%i]  = globals()['S2_VI_ffp_%s_join'%i][globals()['S2_VI_ffp_%s_join'%i]['Year'] == i]
 
-        globals()['S2_VI_ffp_%s_join'%i]  = add_date_info(globals()['S2_VI_ffp_%s_join'%i] )
-        globals()['S2_VI_ffp_%s_join'%i]  = globals()['S2_VI_ffp_%s_join'%i][globals()['S2_VI_ffp_%s_join'%i]['Year'] == i]
+            df = globals()['S2_VI_ffp_%s_join'%i]
+            print('       Concat S2_VI_ffp_%s_join'%i)
 
-        df = globals()['S2_VI_ffp_%s_join'%i]
-        print('       Concat S2_VI_ffp_%s_join'%i)
+            df_VI = pd.concat([df_VI, df]).rename_axis('date')
+        print('\n') 
+        print('       Creating df_VI')
+        print('\n') 
 
-        df_VI = pd.concat([df_VI, df]).rename_axis('date')
-    print('\n') 
-    print('       Creating df_VI')
-    print('\n') 
+        # filtering VI_eshape by flag. Removes dates when there were areas whitin the climatological footprint that were totally masked 
+        df_VI_filtered = df_VI.copy()
+        df_VI_filtered = df_VI_filtered[df_VI_filtered['flag']>80].drop(['flag'], axis = 1)
 
-    # filtering VI_eshape by flag. Removes dates when there were areas whitin the climatological footprint that were totally masked 
-    df_VI_filtered = df_VI.copy()
-    df_VI_filtered = df_VI_filtered[df_VI_filtered['flag']>80].drop(['flag'], axis = 1)
+        # create time series with daily frequency
+        time_series = pd.date_range(start=start, end=end, freq="D")
+        time_series = pd.DataFrame(time_series).rename(columns={0: 'date'}).set_index('date')
 
-    # create time series with daily frequency
-    time_series = pd.date_range(start=start, end=end, freq="D")
-    time_series = pd.DataFrame(time_series).rename(columns={0: 'date'}).set_index('date')
+        # allows to have a time series with daily frequency with gaps when the VI were not calculated or there were not S2 images
+        df_VI_time = pd.merge(left= time_series, right = df_VI_filtered,
+                                     how="left", left_index = True , right_index = True)  
 
-    # allows to have a time series with daily frequency with gaps when the VI were not calculated or there were not S2 images
-    df_VI_time = pd.merge(left= time_series, right = df_VI_filtered,
-                                 how="left", left_index = True , right_index = True)  
+        # interpolate values
+        df_VI_interpolate = df_VI_time.interpolate(method='akima', order=1, limit_direction ='forward')
+        #df_VI_interpolate_limits = df_VI_interpolate.apply(lambda x: x.interpolate(method="spline", order=6))
+        #df_VI_interpolate = df_VI_interpolate.fillna(method='backfill')
+        #df_VI_interpolate = df_VI_interpolate.fillna(method='ffill')
+
+        # file to extrapolate
+        df_VI_export = df_VI_interpolate.dropna().drop(['Year','timestamp'], axis = 1) 
+        df_VI_export.to_csv(outputdir + '/VI_output/' + ID + "_Vegetation_indices.csv")   
+
+        print("       Exporting: Vegetation_indices.csv")
+        print('\n') 
+
+        #---------------------------------------------------------------------------------------------
+        # Save plots of VI
+        def plot_timeseries_vi_multiple(df):
+            # subplots.
+            fig, ax = plt.subplots(figsize=(14, 6)) #Indicates the size of the plot
+
+            if 'NDVI' in bands:
+                # add scatter plots //Adds the scatter points
+                ax.plot(df['NDVI'],
+                           c='#00FF00', alpha=1, label='NDVI', lw=2, linestyle = ':')
+            if 'EVI' in bands:
+                ax.plot(df['EVI'],
+                           c='red', alpha=1, label='EVI', lw=2, linestyle = ':')
+            if 'EVI2' in bands:
+                ax.plot(df['EVI2'],
+                           c='yellow', alpha=1, label='EVI-2', lw=2, linestyle = ':')
+            if 'CLr' in bands:
+                ax.plot(df['CLr'],
+                           c='green', alpha=1, label='CLr', lw=2, linestyle = ':')
+            if 'MNDVI' in bands:
+                ax.plot(df['MNDVI'],
+                           c='black', alpha=1, label='MNDVI', lw=2, linestyle = ':')
+            if 'MNDWI' in bands:
+                ax.plot(df['MNDWI'],
+                           c='#00FFFF', alpha=0.5, label='MNDWI', lw=2, linestyle = '-.')
+            if 'LSWI' in bands:
+                ax.plot(df['LSWI'],
+                           c='blue', alpha=0.8, label='LSWI', lw=2, linestyle = '-.')
+            if 'NDII' in bands:
+                ax.plot(df['NDII'],
+                           c='#00008B', alpha=0.8, label='NDII', lw=2, linestyle = '-.') #marker="x", markersize=2)
+
+            ax.set_title('Vegetation Indices', fontsize=16)
+            ax.set_xlabel('Date', fontsize=14)
+            ax.set_ylabel('Vegetation Index', fontsize=14)
+            ax.set_ylim(-1, 1)
+            ax.grid(lw=0.5)
+            ax.legend(fontsize=14, loc='lower right')
+
+            # shrink current axis by 20%
+            box = ax.get_position()
+            ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+
+            # put a legend to the right of the current axis
+            ax.legend(loc='center left', bbox_to_anchor=(1, .8))
+            #plt.savefig(outputdir + '/VI_output/' + ID + '_VI_timeseries.png', dpi=300, format='png', bbox_inches='tight',pad_inches=0.0001)
+            plt.savefig(outputdir + '/VI_output/' + ID + '_VI_timeseries.png', dpi=300)
+
+            return plt #.show()
+
+        plot_timeseries_vi_multiple(df_VI_export)
+        
+        t92   = ptime.time()
+        strin = ( '{:.1f} [minutes]'.format((t92 - t91) / 60.)                                                      
+                  if (t92 - t91) > 60.
+                  else '{:d} [seconds]'.format(int(t92 - t91))
+                )
+        print('      Computation vegetation indices in ', strin)  
+        print('\n') 
+#*********************************************************************************************************************************************************************
+if calculated_vi:
     
-    # interpolate values
-    df_VI_interpolate = df_VI_time.interpolate(method='akima', order=1, limit_direction ='forward')
-    #df_VI_interpolate_limits = df_VI_interpolate.apply(lambda x: x.interpolate(method="spline", order=6))
-    #df_VI_interpolate = df_VI_interpolate.fillna(method='backfill')
-    #df_VI_interpolate = df_VI_interpolate.fillna(method='ffill')
+    print('11)   Reading vegetation indices time series file \n')
+    
+    t91 = ptime.time()
+    #ee.Authenticate() #For authentifications we require a Google Account registered in GEE (https://earthengine.google.com/)
+    ee.Initialize()  
 
-    # file to extrapolate
-    df_VI_export = df_VI_interpolate.dropna().drop(['Year','timestamp'], axis = 1) 
-    df_VI_export.to_excel(outputdir + '/VI_output/' + ID + "_Vegetation_indices.xlsx")   
+    df_vi_name = outputdir + '/VI_output/' + ID + "_Vegetation_indices.csv"  
+    parser = lambda date: dt.datetime.strptime(date, "%Y-%m-%d")                               
 
-    print("       Exporting: Vegetation_indices.csv")
-    print('\n') 
-
-    #---------------------------------------------------------------------------------------------
+                                                                                                                                                                 
+    df_VI_export = pd.read_csv(df_vi_name, parse_dates=[0], 
+                     date_parser=parser, index_col=0, header=0)
+    
+    #df_VI_export = pd.read_csv(df_vi_name, index_col=0, header=0)
 
     t92   = ptime.time()
     strin = ( '{:.1f} [minutes]'.format((t92 - t91) / 60.)                                                      
               if (t92 - t91) > 60.
               else '{:d} [seconds]'.format(int(t92 - t91))
             )
-    print('      Computation vegetation indices in ', strin)  
+    print('      Reading vegetation indices time series file in ', strin)  
     print('\n') 
 
 
 # # Plots vegetation indices
 
-# In[13]:
+# In[208]:
 
 
-# function to display plots of VI
-def plot_timeseries_vi_multiple(df):
-    # subplots.
-    fig, ax = plt.subplots(figsize=(14, 6)) #Indicates the size of the plot
-
-    if 'NDVI' in bands:
-        # add scatter plots //Adds the scatter points
-        ax.plot(df['NDVI'],
-                   c='#00FF00', alpha=1, label='NDVI', lw=2, linestyle = ':')
-    if 'EVI' in bands:
-        ax.plot(df['EVI'],
-                   c='red', alpha=1, label='EVI', lw=2, linestyle = ':')
-    if 'EVI2' in bands:
-        ax.plot(df['EVI2'],
-                   c='yellow', alpha=1, label='EVI-2', lw=2, linestyle = ':')
-    if 'CLr' in bands:
-        ax.plot(df['CLr'],
-                   c='green', alpha=1, label='CLr', lw=2, linestyle = ':')
-    if 'MNDVI' in bands:
-        ax.plot(df['MNDVI'],
-                   c='black', alpha=1, label='MNDVI', lw=2, linestyle = ':')
-    if 'MNDWI' in bands:
-        ax.plot(df['MNDWI'],
-                   c='#00FFFF', alpha=0.5, label='MNDWI', lw=2, linestyle = '-.')
-    if 'LSWI' in bands:
-        ax.plot(df['LSWI'],
-                   c='blue', alpha=0.8, label='LSWI', lw=2, linestyle = '-.')
-    if 'NDII' in bands:
-        ax.plot(df['NDII'],
-                   c='#00008B', alpha=0.8, label='NDII', lw=2, linestyle = '-.') #marker="x", markersize=2)
-
-    ax.set_title('Vegetation Indices', fontsize=16)
-    ax.set_xlabel('Date', fontsize=14)
-    ax.set_ylabel('Vegetation Index', fontsize=14)
-    ax.set_ylim(-1, 1)
-    ax.grid(lw=0.5)
-    ax.legend(fontsize=14, loc='lower right')
+# def plot_timeseries_vi_single(df,df_original, VI):
     
-    # shrink current axis by 20%
-    box = ax.get_position()
-    ax.set_position([box.x0, box.y0, box.width * 0.8, box.height])
+#     fig, ay = plt.subplots(figsize=(14, 6)) #Indicates the size of the plot
+#     ay.plot(df[VI], c='#00FF00', alpha=0.2, lw=5, label='Akima interpolation')
 
-    # put a legend to the right of the current axis
-    ax.legend(loc='center left', bbox_to_anchor=(1, .8))
-    #plt.savefig(outputdir + '/VI_output/' + ID + '_VI_timeseries.png', dpi=300, format='png', bbox_inches='tight',pad_inches=0.0001)
-    plt.savefig(outputdir + '/VI_output/' + ID + '_VI_timeseries.png', dpi=300)
-
-    return plt #.show()
-
-#---------------------------------------------------------------------------------------------------
-def plot_timeseries_vi_single(df,df_original, VI):
+#     df = df.reset_index()
+#     dff= df_original.reset_index()
     
-    fig, ay = plt.subplots(figsize=(14, 6)) #Indicates the size of the plot
-    ay.plot(df[VI], c='#00FF00', alpha=0.2, lw=5, label='Akima interpolation')
+#     dff.plot(kind="scatter",x='date', y=VI, ax=ay, c='GREEN', alpha=0.80, label=VI.upper())
 
-    df = df.reset_index()
-    dff= df_original.reset_index()
+#     ay.legend(fontsize=12, loc='upper right')
+
+#     ay.grid(lw=0.5)
+
+#     ay.set_title(VI, fontsize=16)
+#     ay.set_xlabel('Date', fontsize=14)
+#     ay.set_ylabel(VI, fontsize=14)
     
-    dff.plot(kind="scatter",x='date', y=VI, ax=ay, c='GREEN', alpha=0.80, label=VI.upper())
+#     return plt #.show()
 
-    ay.legend(fontsize=12, loc='upper right')
-
-    ay.grid(lw=0.5)
-
-    ay.set_title(VI, fontsize=16)
-    ay.set_xlabel('Date', fontsize=14)
-    ay.set_ylabel(VI, fontsize=14)
-    
-    return plt #.show()
-#---------------------------------------------------------------------------------------------------
-#df = df_VI_export.copy()
-#plot_timeseries_vi_multiple(df)
 # plot_timeseries_vi_single(df, df_VI_time, 'NDVI')
 # plot_timeseries_vi_single(df, df_VI_time, 'EVI')
 # plot_timeseries_vi_single(df, df_VI_time, 'EVI2')
@@ -1820,7 +1882,7 @@ def plot_timeseries_vi_single(df,df_original, VI):
 # c1 = a1.copy().sum()
 
 
-# In[14]:
+# In[209]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -1892,7 +1954,7 @@ if environmental_variables_station:
  
 
 
-# In[15]:
+# In[210]:
 
 
 if environmental_variables_satellite:
@@ -2003,7 +2065,7 @@ if environmental_variables_satellite:
  #*********************************************************************************************************************************************************************     
 
 
-# In[16]:
+# In[211]:
 
 
 if tower_observations:
@@ -2062,7 +2124,7 @@ if tower_observations:
 
 # # Plot enviromental variables
 
-# In[17]:
+# In[212]:
 
 
 # variable_meteo = 'TH'
@@ -2134,7 +2196,7 @@ if tower_observations:
 #     ]).properties(width=600, height=300)
 
 
-# In[18]:
+# In[213]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -2327,33 +2389,6 @@ if correlation_analysis:
     
     df_correlation.to_excel(outputdir + '/Model_output/' + ID + "_Interdependency_analysis.xlsx")  
 
-    # correlation_gpp       = ['GPP_observations']
-    # correlation_selection = df_correlation['best_model_cai'].tolist()
-    # correlation_selection = correlation_gpp + correlation_selection 
-
-    # dcorrelation_test_filtered = correlation_test.loc[correlation_selection, correlation_selection]
-    # dcorrelation_test_filtered
-    # #plt.figure(figsize=(1000,1000))
-    # #plt.matshow(dcorrelation_test_filtered)
-    # #plt.show()
-
-    # fig, ax = plt.subplots(figsize=(20,20))
-    # im = ax.imshow(dcorrelation_test_filtered, interpolation='nearest')
-    # fig.colorbar(im, orientation='vertical', fraction = 0.05)
-
-    # # Show all ticks and label them with the dataframe column name
-    # ax.set_xticklabels(dcorrelation_test_filtered.columns, rotation=65, fontsize=15)
-    # ax.set_yticklabels(dcorrelation_test_filtered.columns, rotation=0, fontsize=15)
-
-    # # Loop over data dimensions and create text annotations
-    # for i in range(len(dcorrelation_test_filtered.columns)):
-    #     for j in range(len(dcorrelation_test_filtered.columns)):
-    #         text = ax.text(j, i, round(dcorrelation_test_filtered.to_numpy()[i, j], 2),
-    #                        ha="center", va="center", color="black")
-
-    # fig.savefig(outputdir + '/Model_output/' + ID + '_correlation_matrix' + '.png', dpi=300)
-    # plt.show()
-
     t112a   = ptime.time()
     strin = ( '{:.1f} [minutes]'.format((t112a - t111a) / 60.)                                                      
               if (t112a - t111a) > 60.
@@ -2363,7 +2398,7 @@ if correlation_analysis:
     print('\n')
 
 
-# In[19]:
+# In[214]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -2417,15 +2452,7 @@ if correlation_analysis_simple:
     print('\n')
 
 
-# In[20]:
-
-
-#correlation_analysis_cai_simple.iloc[:20,:]   
-
-
-# # Plot correlation analysis
-
-# In[21]:
+# In[215]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -2662,7 +2689,138 @@ if calibration_validation:
     print('\n') 
 
 
-# In[22]:
+# In[216]:
+
+
+#     #*********************************************************************************************************************************************************************     
+#     if timeseries_thirty:
+        
+#         print('15)  Monthly timeseries \n')
+#         t131 = ptime.time()
+        
+#         # function to create monthly time series (monthly mean or aggregated)
+#         def month_ts(df,years, name, mean=True):
+
+#             # divide dataframe by year  
+#             def group_by_month(df, year):
+
+#                 df = df.copy().reset_index()
+#                 df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
+#                 df['Timestamp'] = pd.to_datetime(df['date']) 
+#                 df['Year']      = pd.DatetimeIndex(df['Timestamp']).year
+#                 df['Month']     = pd.DatetimeIndex(df['Timestamp']).month
+
+                
+#                 df = df[df['Year']==year].copy(deep=True) 
+                
+#                 df_aux_0         = df.loc[:,['Month']]                                          # helps to count the number of days in a month
+#                 df_aux_0['days'] = 1
+#                 df_aux_0         = df_aux_0.groupby(df['Month']).sum().drop('Month', axis = 1)
+
+#                 df_aux_1       =  df.loc[:,['Month','Year']]
+#                 df_aux_1       =  df_aux_1.groupby(df['Month']).mean().drop('Month', axis = 1)
+
+#                 if mean:
+#                     df= df.groupby(df['Month']).mean()
+#                 else:
+#                     df= df.groupby(df['Month']).sum()
+
+#                 dff = df.drop('Year', axis = 1)
+
+#                 dff = pd.merge(left= dff, right = df_aux_0,
+#                              how="left", left_index = True , right_index = True)
+
+#                 dff = pd.merge(left= dff, right = df_aux_1,
+#                              how="left", left_index = True , right_index = True)
+#                 return dff
+
+#             for i in years:
+                
+#                 globals()['df_month_%s' % i] = group_by_month(df, i)
+
+#             df_total = pd.DataFrame(columns=df.columns)
+
+#             for i in years:
+
+#                 df = globals()['df_month_%s' % i]
+#                 df_total = pd.concat([df_total, df]).dropna(axis=1,how ='all')
+
+#             df = df_total.reset_index().rename(columns={'index' : 'Month'})
+
+#             df['Year']  = df['Year'].astype('int').astype('str')
+#             df['Month'] = df['Month'].astype('int').astype('str')
+#             df['date']  = df['Year']+ '-'+ df['Month']
+#             df['date']  = pd.to_datetime(df['date'], format='%Y-%m')
+            
+#             df          =  df.set_index('date').drop(['Year','Month'], axis =1) 
+#             print('      Monthly timeseries for %s' %name)
+            
+#             return df
+        
+#         def date_tostring(date): 
+#             string_date =  date.strftime("%Y-%m")
+#             return string_date
+        
+#         EV_dataframes_month = []
+        
+#         # deriving time series
+#         if df_rainfall_station_switch:
+#             df_rainfall_station_m  = month_ts(df_rainfall_station,years,'df_rainfall_station',mean = False).drop('days', axis = 1)
+#             EV_dataframes_month.append(df_rainfall_station_m)
+                
+#         if df_meteo_station_switch:
+#             df_meteo_station_m     = month_ts(df_meteo_station,years,'df_meteo_station',mean = False).drop('days', axis = 1)
+#             EV_dataframes_month.append(df_meteo_station_m)
+            
+#         if df_rainfall_CHIRPS_switch:
+#             df_rainfall_CHIRPS_m   = month_ts(df_rainfall_CHIRPS,years,'df_rainfall_CHIRPS',mean = False).drop('days', axis = 1)
+#             EV_dataframes_month.append(df_rainfall_CHIRPS_m)
+             
+#         if df_temp_MODIS_switch:
+#             df_temp_MODIS_m        = month_ts(df_temp_MODIS ,years,'df_temp_MODIS',mean = False).drop('days', axis = 1)
+#             EV_dataframes_month.append(df_temp_MODIS_m)
+            
+#         if df_meteo_tower_switch:
+#             df_meteo_tower_m       = month_ts(df_meteo_tower,years,'df_meteo_tower',mean = False).drop('days', axis = 1)
+#             EV_dataframes_month.append(df_meteo_tower_m)
+            
+#         df_gpp_MODIS_m         = month_ts(df_gpp_MODIS  ,years,'df_gpp_MODIS',mean = False).drop('days', axis = 1)
+#         df_gpp_tower_m_sum     = month_ts(df_gpp_tower,years,'df_gpp_tower (sum)',mean = False)
+#         df_gpp_tower_m_mean    = month_ts(df_gpp_tower,years,'df_gpp_tower (mean)',mean = True)
+
+#         for n in EV_dataframes_month:
+#             df_gpp_tower_m_sum = pd.merge(left= df_gpp_tower_m_sum, right = n,
+#                                          how="left", left_index = True , right_index = True)
+            
+#         # deriving information of days in a month and adding variables by month 
+#         df_month_days          = df_gpp_tower_m_sum.loc[:,'days'].tolist()                    #Variable along the period 
+#         df_month_var           = df_gpp_tower_m_sum.loc[:,best_model_cai_EV].tolist()         #Variable along the period 
+#         df_month_dates         = df_gpp_tower_m_sum.reset_index()
+#         df_month_dates['date'] = df_month_dates['date'].dt.date
+#         df_month_dates['date_end'] = df_month_dates['date'] + relativedelta(months=+1)
+            
+#         df_month_dates_beggining   = df_month_dates['date'].apply(date_tostring).tolist()
+#         df_month_dates_end         = df_month_dates['date_end'].apply(date_tostring).tolist()
+
+#         # monthly in-situ GPP
+#         df_30_var_gpp             = df_gpp_tower_m_sum.loc[:,'GPP_observations'].tolist() 
+#         df_GPP_observations_30    = pd.DataFrame({'Date':df_month_dates_beggining,'Observed_GPP':df_30_var_gpp}).set_index('Date')
+
+#         n_maps_30 = []
+#         for n in range(len(df_month_dates)):
+#             n_maps_30.append(n)
+            
+#         t132    = ptime.time()
+#         strin   = ( '{:.1f} [minutes]'.format((t132 - t131) / 60.)                                                      
+#                   if (t132 - t131) > 60.
+#                   else '{:d} [seconds]'.format(int(t132 - t131))
+#                 )
+#         print('\n') 
+#         print('     Computed monthly time series in ', strin) 
+#         print('\n') 
+
+
+# In[217]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -2670,119 +2828,61 @@ if timeseries_thirty:
     
     print('15)  Monthly timeseries \n')
     t131 = ptime.time()
-    
-    # function to create monthly time series (monthly mean or aggregated)
-    def month_ts(df,years, name, mean=True):
 
-        # divide dataframe by year  
-        def group_by_month(df, year):
+    def fifteen_ts(df,best_model_cai_EV, name):
+        
+        def date_tostring(date): 
+            string_date  =  date.strftime("%Y-%m-%d")
+            return string_date
 
-            df = df.copy().reset_index()
-            df['date'] = pd.to_datetime(df['date'], format='%Y-%m-%d')
-            df['Timestamp'] = pd.to_datetime(df['date']) 
-            df['Year']      = pd.DatetimeIndex(df['Timestamp']).year
-            df['Month']     = pd.DatetimeIndex(df['Timestamp']).month
+        day_aux           = pd.date_range(start=time1_aux, end=time2_aux, freq ='d').strftime("%Y-%m-%d") 
+        day_aux           = pd.DataFrame(day_aux).rename(columns={0: 'Date'}) 
 
+        day_aux['Date_delay'] = pd.to_datetime(day_aux['Date']) - dt.timedelta(days = 1)
+        start_minus_1day  = day_aux['Date_delay'].apply(date_tostring).tolist()
+        
+        df['days']       = 1.
+
+        day_30           = pd.date_range(start=start_minus_1day[0], end=time2_aux, freq = 'M').strftime("%Y-%m-%d") 
+        day_30           = pd.DataFrame(day_30).rename(columns={0: 'Date'}) 
+
+        day_30['Date_beggining'] = pd.to_datetime(day_30['Date']) + dt.timedelta(days = 1)
+        day_30['Date_end']       = pd.to_datetime(day_30['Date']).shift(-1)
+        day_30_list              = day_30
+        day_30                   = day_30.drop(day_30.index[len(day_30)-1])
+
+        day_30_beggining = day_30['Date_beggining'].apply(date_tostring).tolist()
+        day_30_end       = day_30['Date_end'].apply(date_tostring).tolist()
+        day_30_list      = day_30_list['Date_beggining'].apply(date_tostring).tolist()
+
+        df_days = []
+        df_var  = []
+
+        for n  in range(len(day_30_end)):
+            days = df.loc[day_30_beggining[n]:day_30_end[n],'days'].sum()
+            var  = df.loc[day_30_beggining[n]:day_30_end[n],best_model_cai_EV].sum()
+            df_days.append(days)
+            df_var.append(var)
             
-            df = df[df['Year']==year].copy(deep=True) 
-            
-            df_aux_0         = df.loc[:,['Month']]                                          # helps to count the number of days in a month
-            df_aux_0['days'] = 1
-            df_aux_0         = df_aux_0.groupby(df['Month']).sum().drop('Month', axis = 1)
-
-            df_aux_1       =  df.loc[:,['Month','Year']]
-            df_aux_1       =  df_aux_1.groupby(df['Month']).mean().drop('Month', axis = 1)
-
-            if mean:
-                df= df.groupby(df['Month']).mean()
-            else:
-                df= df.groupby(df['Month']).sum()
-
-            dff = df.drop('Year', axis = 1)
-
-            dff = pd.merge(left= dff, right = df_aux_0,
-                         how="left", left_index = True , right_index = True)
-
-            dff = pd.merge(left= dff, right = df_aux_1,
-                         how="left", left_index = True , right_index = True)
-            return dff
-
-        for i in years:
-            
-            globals()['df_month_%s' % i] = group_by_month(df, i)
-
-        df_total = pd.DataFrame(columns=df.columns)
-
-        for i in years:
-
-            df = globals()['df_month_%s' % i]
-            df_total = pd.concat([df_total, df]).dropna(axis=1,how ='all')
-
-        df = df_total.reset_index().rename(columns={'index' : 'Month'})
-
-        df['Year']  = df['Year'].astype('int').astype('str')
-        df['Month'] = df['Month'].astype('int').astype('str')
-        df['date']  = df['Year']+ '-'+ df['Month']
-        df['date']  = pd.to_datetime(df['date'], format='%Y-%m')
+        n_maps_30 = []
+        for n in range(len(day_30_end)):
+            n_maps_30.append(n)
         
-        df          =  df.set_index('date').drop(['Year','Month'], axis =1) 
-        print('      Monthly timeseries for %s' %name)
-        
-        return df
+        print('      30-day timeseries for %s' %name)
+        return df_days, df_var, n_maps_30, day_30_beggining, day_30_end 
     
-    def date_tostring(date): 
-        string_date =  date.strftime("%Y-%m")
-        return string_date
-    
-    EV_dataframes_month = []
-    
-    # deriving time series
-    if df_rainfall_station_switch:
-        df_rainfall_station_m  = month_ts(df_rainfall_station,years,'df_rainfall_station',mean = False).drop('days', axis = 1)
-        EV_dataframes_month.append(df_rainfall_station_m)
-            
-    if df_meteo_station_switch:
-        df_meteo_station_m     = month_ts(df_meteo_station,years,'df_meteo_station',mean = False).drop('days', axis = 1)
-        EV_dataframes_month.append(df_meteo_station_m)
-        
-    if df_rainfall_CHIRPS_switch:
-        df_rainfall_CHIRPS_m   = month_ts(df_rainfall_CHIRPS,years,'df_rainfall_CHIRPS',mean = False).drop('days', axis = 1)
-        EV_dataframes_month.append(df_rainfall_CHIRPS_m)
-         
-    if df_temp_MODIS_switch:
-        df_temp_MODIS_m        = month_ts(df_temp_MODIS ,years,'df_temp_MODIS',mean = False).drop('days', axis = 1)
-        EV_dataframes_month.append(df_temp_MODIS_m)
-        
-    if df_meteo_tower_switch:
-        df_meteo_tower_m       = month_ts(df_meteo_tower,years,'df_meteo_tower',mean = False).drop('days', axis = 1)
-        EV_dataframes_month.append(df_meteo_tower_m)
-        
-    df_gpp_MODIS_m         = month_ts(df_gpp_MODIS  ,years,'df_gpp_MODIS',mean = False).drop('days', axis = 1)
-    df_gpp_tower_m_sum     = month_ts(df_gpp_tower,years,'df_gpp_tower (sum)',mean = False)
-    df_gpp_tower_m_mean    = month_ts(df_gpp_tower,years,'df_gpp_tower (mean)',mean = True)
+    df_gpp_tower_30 = df_gpp_tower
 
-    for n in EV_dataframes_month:
-        df_gpp_tower_m_sum = pd.merge(left= df_gpp_tower_m_sum, right = n,
+    for n in EV_dataframes:
+        df_gpp_tower_30 = pd.merge(left= df_gpp_tower_30, right = n,
                                      how="left", left_index = True , right_index = True)
-        
-    # deriving information of days in a month and adding variables by month 
-    df_month_days          = df_gpp_tower_m_sum.loc[:,'days'].tolist()                    #Variable along the period 
-    df_month_var           = df_gpp_tower_m_sum.loc[:,best_model_cai_EV].tolist()         #Variable along the period 
-    df_month_dates         = df_gpp_tower_m_sum.reset_index()
-    df_month_dates['date'] = df_month_dates['date'].dt.date
-    df_month_dates['date_end'] = df_month_dates['date'] + relativedelta(months=+1)
-        
-    df_month_dates_beggining   = df_month_dates['date'].apply(date_tostring).tolist()
-    df_month_dates_end         = df_month_dates['date_end'].apply(date_tostring).tolist()
 
-    # monthly in-situ GPP
-    df_30_var_gpp             = df_gpp_tower_m_sum.loc[:,'GPP_observations'].tolist() 
-    df_GPP_observations_30    = pd.DataFrame({'Date':df_month_dates_beggining,'Observed_GPP':df_30_var_gpp}).set_index('Date')
-
-    n_maps_30 = []
-    for n in range(len(df_month_dates)):
-        n_maps_30.append(n)
-        
+    df_30_days, df_30_var, n_maps_30, df_30_beggining, df_30_end = fifteen_ts(df_gpp_tower_30,best_model_cai_EV, 'df_gpp_tower and best_model_cai_EV')
+    df_30_days_gpp, df_30_var_gpp, n_maps_30_gpp, df_30_beggining_gpp, df_30_end_gpp = fifteen_ts(df_gpp_tower_30,'GPP_observations', 'df_gpp_tower and GPP_observations')
+    
+    df_GPP_observations_30    = pd.DataFrame({'Date':df_30_beggining_gpp,'Observed_GPP':df_30_var_gpp}).set_index('Date')
+    
+    
     t132    = ptime.time()
     strin   = ( '{:.1f} [minutes]'.format((t132 - t131) / 60.)                                                      
               if (t132 - t131) > 60.
@@ -2793,7 +2893,7 @@ if timeseries_thirty:
     print('\n') 
 
 
-# In[23]:
+# In[218]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -2816,7 +2916,7 @@ if timeseries_fifteen:
         
         df['days']       = 1.
 
-        day_15           = pd.date_range(start=start_minus_1day[0], end=time2_aux, freq ='SM').strftime("%Y-%m-%d") 
+        day_15           = pd.date_range(start=start_minus_1day[0], end=time2_aux, freq = time_window_maps).strftime("%Y-%m-%d") 
         day_15           = pd.DataFrame(day_15).rename(columns={0: 'Date'}) 
 
         day_15['Date_beggining'] = pd.to_datetime(day_15['Date']) + dt.timedelta(days = 1)
@@ -2866,7 +2966,7 @@ if timeseries_fifteen:
     print('\n')
 
 
-# In[91]:
+# In[219]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -3018,61 +3118,67 @@ if mapping_GPP:
 
         cluster_ecosystem_results  = cluster_name[cluster_ecosystem]
         cluster_ecosystem_geometry = cluster_ecosystem_results 
+        
+    if maps_from_features: 
+        
+        print('18)  Importing vegetation calssification maps \n')
+        t161 = ptime.time()
+        
+        #feature_collection = "users/mafmonjaraz/castanuela_study"
+        cluster_ecosystem_geometry = ee.FeatureCollection(feature_collection)
+        cluster_ecosystem_geometry = cluster_ecosystem_geometry.geometry()
+        
+    t162    = ptime.time()
+    strin   = ( '{:.1f} [minutes]'.format((t162 - t161) / 60.)                                                      
+              if (t162 - t161) > 60.
+              else '{:d} [seconds]'.format(int(t162 - t161))
+            )
+    print('\n')
+    print('     Computed vegetation classification maps in ', strin)  
+    print('\n')
 
-        if maps_from_features: 
-            #feature_collection = "users/mafmonjaraz/castanuela_study"
-            cluster_ecosystem_geometry = ee.FeatureCollection(feature_collection)
-            cluster_ecosystem_geometry = cluster_ecosystem_geometry.geometry()
+    # Mapping with folium
+    # a) create a folium map object.
+    #my_map = folium.Map(location=[latitude,longitude], zoom_start=15, height=500)
+    my_map = folium.Map(location= [latitude,longitude], zoom_start=12)
+    # b) add custom basemaps
+    basemaps['Esri Satellite'].add_to(my_map)
+    basemaps['Google Satellite Hybrid'].add_to(my_map)
+    # c) set visualization parameters.
+    vis_params = {
+      'min': 0,
+      'max': 4000,
+      'palette': ['006633', 'E5FFCC', '662A00', 'D8D8D8', 'F5F5F5']}
 
-        t162    = ptime.time()
-        strin   = ( '{:.1f} [minutes]'.format((t162 - t161) / 60.)                                                      
-                  if (t162 - t161) > 60.
-                  else '{:d} [seconds]'.format(int(t162 - t161))
-                )
-        print('\n')
-        print('     Computed vegetation classification maps in ', strin)  
-        print('\n')
+    # d) add ee.Image and print information. Elevation model.
+    #dem  = ee.Image('USGS/SRTMGL1_003')
+    #xy   = ee.Geometry.Point([86.9250, 27.9881])
+    #elev = dem.sample(xy, 30).first().get('elevation').getInfo()                                       #print the elevation of Mount Everest.
+    #my_map.add_ee_layer(dem.updateMask(dem.gt(0)), vis_params, 'DEM')
+    #print('Mount Everest elevation (m):', elev)
 
-        # Mapping with folium
-        # a) create a folium map object.
-        #my_map = folium.Map(location=[latitude,longitude], zoom_start=15, height=500)
-        my_map = folium.Map(location= [lon_lat[1], lon_lat[0]], zoom_start=12)
-        # b) add custom basemaps
-        basemaps['Esri Satellite'].add_to(my_map)
-        basemaps['Google Satellite Hybrid'].add_to(my_map)
-        # c) set visualization parameters.
-        vis_params = {
-          'min': 0,
-          'max': 4000,
-          'palette': ['006633', 'E5FFCC', '662A00', 'D8D8D8', 'F5F5F5']}
+    # d) display ee.Image
+    #dataset        = ee.Image('JRC/GSW1_1/GlobalSurfaceWater')
+    #occurrence     = dataset.select('occurrence');
+    #occurrenceVis  = {'min': 0.0, 'max': 100.0, 'palette': ['ffffff', 'ffbbbb', '0000ff']}
+    #my_map.add_ee_layer(occurrence, occurrenceVis, 'JRC Surface Water')
 
-        # d) add ee.Image and print information. Elevation model.
-        #dem  = ee.Image('USGS/SRTMGL1_003')
-        #xy   = ee.Geometry.Point([86.9250, 27.9881])
-        #elev = dem.sample(xy, 30).first().get('elevation').getInfo()                                       #print the elevation of Mount Everest.
-        #my_map.add_ee_layer(dem.updateMask(dem.gt(0)), vis_params, 'DEM')
-        #print('Mount Everest elevation (m):', elev)
+    # d) display ee.Geometry
+    #holePoly = ee.Geometry.Polygon(coords = [[[-35, -10], [-35, 10], [35, 10], [35, -10], [-35, -10]]],
+    #                               proj= 'EPSG:4326',
+    #                               geodesic = True,
+    #                               maxError= 1.,
+    #                               evenOdd = False)
+    #my_map.add_ee_layer(holePoly, {}, 'Polygon')
 
-        # d) display ee.Image
-        #dataset        = ee.Image('JRC/GSW1_1/GlobalSurfaceWater')
-        #occurrence     = dataset.select('occurrence');
-        #occurrenceVis  = {'min': 0.0, 'max': 100.0, 'palette': ['ffffff', 'ffbbbb', '0000ff']}
-        #my_map.add_ee_layer(occurrence, occurrenceVis, 'JRC Surface Water')
+    # d) display ee.FeatureCollection
+    #fc  = ee.FeatureCollection('TIGER/2018/States')
+    #my_map.add_ee_layer(fc, {}, 'US States')
 
-        # d) display ee.Geometry
-        #holePoly = ee.Geometry.Polygon(coords = [[[-35, -10], [-35, 10], [35, 10], [35, -10], [-35, -10]]],
-        #                               proj= 'EPSG:4326',
-        #                               geodesic = True,
-        #                               maxError= 1.,
-        #                               evenOdd = False)
-        #my_map.add_ee_layer(holePoly, {}, 'Polygon')
+    # d) display Geometry
+    vis_params_geometry = dict(color='red', weight=2, opacity=10, fillColor='red')
 
-        # d) display ee.FeatureCollection
-        #fc  = ee.FeatureCollection('TIGER/2018/States')
-        #my_map.add_ee_layer(fc, {}, 'US States')
-
-        # d) display Geometry
-        vis_params_geometry = dict(color='red', weight=2, opacity=10, fillColor='red')
+    if climatological_footprint  or calculated_ffp:
 
         for i in years:
             for n in range(len(rst_var)):
@@ -3082,18 +3188,18 @@ if mapping_GPP:
             my_map.add_ee_layer(area, vis_params_geometry , 'area_100_%s' %i)
 
 
-        my_map.add_ee_layer(cluster_ecosystem_geometry,  vis_params_geometry , 'Clustered area')
+    my_map.add_ee_layer(cluster_ecosystem_geometry,  vis_params_geometry , 'Clustered area')
 
-        # e) add a layer control panel to the map.
-        my_map.add_child(folium.LayerControl())
-        plugins.Fullscreen().add_to(my_map)
+    # e) add a layer control panel to the map.
+    my_map.add_child(folium.LayerControl())
+    plugins.Fullscreen().add_to(my_map)
 
-        # f) display the map.
-        #plot display(my_map)
-        my_map.save(outputdir + '/Maps_output/' + ID + '_Classification_map.html')
+    # f) display the map.
+    #plot display(my_map)
+    my_map.save(outputdir + '/Maps_output/' + ID + '_Classification_map.html')
 
 
-# In[ ]:
+# In[220]:
 
 
 #*********************************************************************************************************************************************************************     
@@ -3105,10 +3211,12 @@ if mapping_GPP:
 
     def maps_GEE(timestep, geometry_maps, geometry_fetch, n_maps_time, df_time_var, df_time_days,df_time_dates_beggining, df_time_dates_end):
 
-        names_GPP_f    = []
-        images_GPP_f   = []
-        mean_GPP_f     = []
-        date_GPP_f     = []
+        names_GPP_f              = []
+        images_GPP_f             = []
+        mean_GPP_f               = []
+        mean_GPP_weighted_f      = []
+        mean_GPP_ecosystem_f     = []
+        date_GPP_f               = []
 
         #geometry_maps   = geometry
         reducer         = ee.Reducer.mean()
@@ -3128,6 +3236,7 @@ if mapping_GPP:
             start = df_time_dates_beggining[n]
             end   = df_time_dates_end[n]
             time  = [start,end]
+            year  = int(date.split('-')[0])
             #print('', time)
 
             if timestep==30:
@@ -3215,19 +3324,52 @@ if mapping_GPP:
                 GPP_var   = 'GPP_%s' % name
                 GPP_date  = '%s' % name
                 
-                GPP_mean  =  globals()['GPP_%s' % name].select(['GPP']).reduceRegion(reducer= reducer,geometry=geometry_fetch,scale=10,maxPixels=1e9).getInfo()
+                GPP_mean            =  globals()['GPP_%s' % name].select(['GPP']).reduceRegion(reducer= reducer,geometry=geometry_fetch,scale=10,maxPixels=1e9).getInfo()
+                GPP_mean_ecosystem  =  globals()['GPP_%s' % name].select(['GPP']).reduceRegion(reducer= reducer,geometry=geometry_maps,scale=10,maxPixels=1e9).getInfo()
 
                 images_GPP_f.append(globals()['GPP_%s' % name])
                 names_GPP_f.append(GPP_var)
                 mean_GPP_f.append(GPP_mean['GPP'])
+                mean_GPP_ecosystem_f.append(GPP_mean_ecosystem['GPP'])
                 date_GPP_f.append(date)
-            
+                
             except:
                 
                 print('      There are not images available for the %s time window \n'%name)
-                pass
-       
-        print('\n')
+                pass   
+            
+            i = year
+            for n in range(len(rst_var)):
+
+                    area = globals()['area_%s_%d' %(int(rst_var[n]),i)]
+                    globals()['GPP_mean_area_%s_%d' %(int(rst_var[n]),i)]  =  globals()['GPP_%s' % name].select(['GPP']).reduceRegion(reducer= reducer,geometry=area,scale=10,maxPixels=1e9).getInfo()        
+                    #print('       Retrieving info from area_%s_%d into dataframe:' %(int(rst_var[n]),i))
+                    #print('       GPP_mean_area_%s_%d' %(int(rst_var[n]),i))
+
+
+            area = globals()['area_100_%d' %i]
+            globals()['GPP_mean_area_100_%d' %i]  =  globals()['GPP_%s' % name].select(['GPP']).reduceRegion(reducer= reducer,geometry=area,scale=10,maxPixels=1e9).getInfo()        
+            #print('       Retrieving info from area_100_%d into dataframe:' %i)
+            #print('       GPP_mean_area_100_%d' %i)
+            
+            try:
+                GPP_mean_weighted = 0
+                for n in range(len(rst_var)):
+
+                        dic = globals()['GPP_mean_area_%s_%d' %(int(rst_var[n]),i)]['GPP'] * contourlines_frequency
+                        GPP_mean_weighted = GPP_mean_weighted + dic
+                        #print('       Adding GPP_mean_area_%s_%d' %(int(rst_var[n]),i))
+
+                dic = globals()['GPP_mean_area_100_%d' %i]['GPP'] * contourlines_frequency
+                GPP_mean_weighted = GPP_mean_weighted + dic
+                #print('       Adding GPP_mean_area_100_%d' %i)
+                mean_GPP_weighted_f.append(GPP_mean_weighted)
+                #print('      Mean weighted GPP succesfully calculated')
+                
+            except:
+                #print('      There are not pixels in the region to calculate the mean weighted GPP')
+                mean_GPP_weighted_f.append('NA')
+                pass   
         
         # add layers to the map using a loop. 
         for namer, img in zip(names_GPP_f, images_GPP_f):
@@ -3241,14 +3383,13 @@ if mapping_GPP:
         folium.LayerControl(collapsed = False).add_to(map_variables_f)
 
         # display the map.
-        #plot display(map_variables_f)  
+        #display(map_variables_f)  
 
+        return map_variables_f, images_GPP_f, names_GPP_f, mean_GPP_f, date_GPP_f, mean_GPP_weighted_f, mean_GPP_ecosystem_f
 
-        return map_variables_f, images_GPP_f, names_GPP_f, mean_GPP_f, date_GPP_f
-
-    def export_maps(urlTh_list_f, url_list_f, geometry_maps, names_f, maps, Calculated_GPP, date_GPP):
+    def export_maps(urlTh_list_f, url_list_f, geometry_maps, names_f, maps, Calculated_GPP, date_GPP, Calculated_weighted_GPP, Calculated_ecosystem_GPP):
             for name, img in zip(names_f, maps):
-                # writes url
+                # write url
                 urlTh = img.select('GPP').getThumbUrl({ "min":0, "max":400, 
                                                         'dimensions': 512, 
                                                         'region': geometry_maps,
@@ -3282,22 +3423,60 @@ if mapping_GPP:
                 print(urlD)
                 Image(url=urlTh)
                 ''
-            vlabs    = {'Date':date_GPP,'Name':names_f,'Maps':urlTh_list_f, 'GeoTIFF': url_list_f,'Calculated_GPP':Calculated_GPP}
-            
-            #'Observed_GPP':observed_GPP
-            #df_vlabs = pd.DataFrame(vlabs).set_index('Name')
+            vlabs    = {'Date':date_GPP,'Name':names_f,'Maps':urlTh_list_f, 'GeoTIFF': url_list_f,'Calculated_GPP':Calculated_GPP, 'Calculated_weighted_GPP':Calculated_weighted_GPP, 'Calculated_ecosystem_GPP':Calculated_ecosystem_GPP}
 
             return urlTh_list_f, url_list_f, vlabs
+        
+    def df_download(df):
+
+        df.drop(index=df.index[0], axis=0, inplace=True)
+        for ind in df.index:
+
+            file_path_tiff = outputdir + "/Maps_output/" + ID + "_" + df['Name'][ind] + ".tiff"
+            file_path_png  = outputdir + "/Maps_output/" + ID + "_" + df['Name'][ind] + ".png"
+
+            link_tiff = df['GeoTIFF'][ind]
+            link_png  = df['Maps'][ind]
+
+            try:
+                urllib.request.urlretrieve(link_tiff, file_path_tiff)
+                urllib.request.urlretrieve(link_png, file_path_png)
+                #print(f"{df['Name'][ind]} has been downloaded successfully.")
+            except:
+                print(f"Failed to download {df['Name'][ind]}.")
+
+        return
+
+#             if mapping_GPP_thirty:
+#                 print('19a)  Mapping monthly GPP \n')
+#                 dashboard_30, maps_GPP_30, names_GPP_30, mean_GPP_30, date_GPP_30 = maps_GEE(30,cluster_ecosystem_geometry, point.buffer(fetch), n_maps_30, df_month_var, df_month_days,df_month_dates_beggining, df_month_dates_end)
+#                 dashboard_30.save(outputdir + '/Maps_output/' + ID + '_Dashboard_30.html')
+
+#                 urlTh_list_30 = []
+#                 url_list_30   = []
+
+#                 urlTh_list_30_test, url_list_30_test, vlabs_test_30 = export_maps(urlTh_list_30, url_list_30, cluster_ecosystem_geometry, names_GPP_30, maps_GPP_30, mean_GPP_30,date_GPP_30)
+#                 df_vlabs_30 = pd.DataFrame(vlabs_test_30).set_index('Date')
+        
+#                 df_vlabs_30_f = pd.merge(left= df_GPP_observations_30 , right = df_vlabs_30,
+#                                   how="left", left_index = True , right_index = True)
+        
+#                 df_vlabs_30_f = df_vlabs_30_f.reindex(columns = [col for col in df_vlabs_30_f.columns if col != 'Observed_GPP'] + ['Observed_GPP'])
+        
+#                 df_vlabs_30_f.to_excel(outputdir + '/Maps_output/' + ID + "_Maps_30.xlsx")  
+#                 print('\n')
+
 
     if mapping_GPP_thirty:
-        print('19a)  Mapping monthly GPP \n')
-        dashboard_30, maps_GPP_30, names_GPP_30, mean_GPP_30, date_GPP_30 = maps_GEE(30,cluster_ecosystem_geometry, point.buffer(fetch), n_maps_30, df_month_var, df_month_days,df_month_dates_beggining, df_month_dates_end)
-        dashboard_30.save(outputdir + '/Maps_output/' + ID + '_Dashboard_30.html')
+
+        print('19a)  Mapping 30-day GPP \n')
+        dashboard_30, maps_GPP_30, names_GPP_30, mean_GPP_30, date_GPP_30, mean_GPP_weighted_30, mean_GPP_ecosystme_30 = maps_GEE(30,cluster_ecosystem_geometry,point.buffer(fetch), n_maps_30, df_30_var, df_30_days,df_30_beggining, df_30_end)
+        dashboard_30.save(outputdir + '/Maps_output/' + ID + "_Dashboard_30.html")
 
         urlTh_list_30 = []
         url_list_30   = []
 
-        urlTh_list_30_test, url_list_30_test, vlabs_test_30 = export_maps(urlTh_list_30, url_list_30, cluster_ecosystem_geometry, names_GPP_30, maps_GPP_30, mean_GPP_30,date_GPP_30)
+        urlTh_list_30_test, url_list_30_test, vlabs_test_30 = export_maps(urlTh_list_30, url_list_30, cluster_ecosystem_geometry, names_GPP_30, maps_GPP_30,mean_GPP_30,date_GPP_30, mean_GPP_weighted_30, mean_GPP_ecosystme_30)
         df_vlabs_30 = pd.DataFrame(vlabs_test_30).set_index('Date')
         
         df_vlabs_30_f = pd.merge(left= df_GPP_observations_30 , right = df_vlabs_30,
@@ -3305,19 +3484,22 @@ if mapping_GPP:
         
         df_vlabs_30_f = df_vlabs_30_f.reindex(columns = [col for col in df_vlabs_30_f.columns if col != 'Observed_GPP'] + ['Observed_GPP'])
         
-        df_vlabs_30_f.to_excel(outputdir + '/Maps_output/' + ID + "_Maps_30.xlsx")  
+        df_vlabs_30_f.to_excel(outputdir + "/Maps_output/" + ID + "_Maps_30.xlsx")  
+        
+        if download_maps:
+            df_download(df_vlabs_30_f)
         print('\n')
     
     if mapping_GPP_fifteen: 
 
         print('19b)  Mapping 15-day GPP \n')
-        dashboard_15, maps_GPP_15, names_GPP_15, mean_GPP_15, date_GPP_15 = maps_GEE(15,cluster_ecosystem_geometry,point.buffer(fetch), n_maps_15, df_15_var, df_15_days,df_15_beggining, df_15_end)
+        dashboard_15, maps_GPP_15, names_GPP_15, mean_GPP_15, date_GPP_15, mean_GPP_weighted_15, mean_GPP_ecosystme_15 = maps_GEE(15,cluster_ecosystem_geometry,point.buffer(fetch), n_maps_15, df_15_var, df_15_days,df_15_beggining, df_15_end)
         dashboard_15.save(outputdir + '/Maps_output/' + ID + "_Dashboard_15.html")
 
         urlTh_list_15 = []
         url_list_15   = []
 
-        urlTh_list_15_test, url_list_15_test, vlabs_test_15 = export_maps(urlTh_list_15, url_list_15, cluster_ecosystem_geometry, names_GPP_15, maps_GPP_15,mean_GPP_15,date_GPP_15)
+        urlTh_list_15_test, url_list_15_test, vlabs_test_15 = export_maps(urlTh_list_15, url_list_15, cluster_ecosystem_geometry, names_GPP_15, maps_GPP_15,mean_GPP_15,date_GPP_15,mean_GPP_weighted_15, mean_GPP_ecosystme_15)
         df_vlabs_15 = pd.DataFrame(vlabs_test_15).set_index('Date')
         
         df_vlabs_15_f = pd.merge(left= df_GPP_observations_15 , right = df_vlabs_15,
@@ -3325,8 +3507,13 @@ if mapping_GPP:
         
         df_vlabs_15_f = df_vlabs_15_f.reindex(columns = [col for col in df_vlabs_15_f.columns if col != 'Observed_GPP'] + ['Observed_GPP'])
         
-        df_vlabs_15_f.to_excel(outputdir + "/Maps_output/" + ID + "_Maps_15.xlsx")   
+        df_vlabs_15_f.to_excel(outputdir + "/Maps_output/" + ID + "_Maps_15.xlsx") 
+        
+        if download_maps:
+            df_download(df_vlabs_30_f)
+            
         print('\n')
+        
     t172    = ptime.time()
     strin   = ( '{:.1f} [minutes]'.format((t172 - t171) / 60.)                                                      
               if (t172 - t171) > 60.
