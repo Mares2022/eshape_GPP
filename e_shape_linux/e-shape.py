@@ -3510,7 +3510,7 @@ if mapping_GPP:
         df_vlabs_15_f.to_excel(outputdir + "/Maps_output/" + ID + "_Maps_15.xlsx") 
         
         if download_maps:
-            df_download(df_vlabs_30_f)
+            df_download(df_vlabs_15_f)
             
         print('\n')
         
